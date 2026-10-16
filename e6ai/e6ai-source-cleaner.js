@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         e6AI Source Cleaner
 // @namespace    e6ai-admin-tools
-// @version      1.3
-// @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
+// @version      1.4
 // @author       Jelloponies
 // @description  Admin tool: remove invalid sources from one user's posts, with preview, backup and restore.
 // @match        https://e6ai.net/*
 // @match        https://e621.net/*
+// @noframes
+// @run-at       document-idle
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -16,10 +17,18 @@
 (function () {
   'use strict';
 
-  const DELAY = 1100;       // ms between requests (rate limit)
-  const MAX_RETRIES = 5;    // for 429 / 5xx / network errors
+  const DELAY = 1100;                // ms between requests (rate limit)
+  const MAX_DELAY = 5000;            // ceiling for the adaptive delay after 429s
+  const MAX_RETRIES = 5;             // for 429 / 5xx / network errors
+  const MAX_CONSECUTIVE_FAILS = 5;   // abort a run after this many failed edits in a row
+  const MAX_BACKUPS = 5;             // applied-run backups kept in the browser
+  const MAX_LOG_LINES = 2000;
+  const SITE = location.origin;
+
   let stopFlag = false;
-  let previewBackup = {};   // result of the last preview (not persisted)
+  let running = false;
+  let delay = DELAY;                 // current pacing; grows after 429s, resets each run
+  let plan = null;                   // result of the last preview; Apply only edits what is in here
 
   GM_addStyle(`
     /* Same palette as the User Audit script (the site's "Bloodlust" theme) */
@@ -47,7 +56,8 @@
     #sc-panel input[type=text]:focus, #sc-panel textarea:focus { outline: 1px solid var(--sc-accent); }
     #sc-panel button { margin: 8px 6px 0 0; padding: 5px 10px; cursor: pointer; background: var(--sc-foreground);
       color: var(--sc-link); border: 1px solid var(--sc-section-light); border-radius: 4px; }
-    #sc-panel button:hover { background: var(--sc-background); color: var(--sc-hover); }
+    #sc-panel button:hover:not(:disabled) { background: var(--sc-background); color: var(--sc-hover); }
+    #sc-panel button:disabled { opacity: .45; cursor: not-allowed; }
     #sc-status { margin-top: 10px; font-size: 12px; font-weight: bold; color: var(--sc-accent); }
     #sc-log { margin-top: 6px; flex: 1 1 120px; min-height: 120px; overflow: auto; background: var(--sc-background);
       color: var(--sc-muted); border: 1px solid var(--sc-foreground); font-family: monospace; font-size: 11px;
@@ -65,7 +75,7 @@
     <input type="text" id="sc-user" placeholder="username">
     <label>Extra search tags <span class="hint">(optional)</span></label>
     <input type="text" id="sc-tags" placeholder="e.g. director:name source:*example.com*">
-    <div class="hint">Passed straight to the site's search. Narrowing it to posts that already have the bad source makes runs much faster.</div>
+    <div class="hint">Passed straight to the site's search. Narrowing it to posts that already have the bad source makes runs much faster. Don't use order: tags (paging relies on the default order).</div>
     <div class="row">
       <label style="margin:0"><input type="radio" name="sc-mode" value="exact" checked> Remove these exact sources (one per line)</label>
     </div>
@@ -85,13 +95,17 @@
     <input type="text" id="sc-reason" value="Removing invalid sources">
     <div>
       <button id="sc-preview">Preview (dry run)</button>
-      <button id="sc-apply">Apply</button>
+      <button id="sc-apply">Apply previewed changes</button>
       <button id="sc-stop">Stop</button>
     </div>
+    <div class="hint">Apply only edits the posts listed by the last preview. If you change any setting, run Preview again.</div>
     <div>
       <button id="sc-download">Download backup</button>
       <button id="sc-restore">Restore from file…</button>
       <input type="file" id="sc-file" accept=".json" style="display:none">
+    </div>
+    <div class="row">
+      <label style="margin:0;font-weight:normal"><input type="checkbox" id="sc-force"> Force restore (also overwrite posts edited since the cleanup)</label>
     </div>
     <div id="sc-status"></div>
     <div id="sc-log"></div>
@@ -171,17 +185,55 @@
   header.addEventListener('pointercancel', endDrag);
   window.addEventListener('resize', () => { if (panel.style.display === 'flex') clampPanel(); });
 
+  // ---------- helpers ----------
   const $ = (id) => document.getElementById(id);
-  const log = (msg) => { const l = $('sc-log'); l.textContent += msg + '\n'; l.scrollTop = l.scrollHeight; };
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Append text nodes instead of rebuilding one huge string, and keep the log bounded.
+  const log = (msg) => {
+    const l = $('sc-log');
+    l.appendChild(document.createTextNode(msg + '\n'));
+    while (l.childNodes.length > MAX_LOG_LINES) l.removeChild(l.firstChild);
+    l.scrollTop = l.scrollHeight;
+  };
+  const setStatus = (text) => { $('sc-status').textContent = text; };
+
+  // Sleeps in short slices so Stop takes effect quickly, even during a long retry backoff.
+  const sleep = async (ms) => {
+    const end = Date.now() + ms;
+    while (!stopFlag) {
+      const left = end - Date.now();
+      if (left <= 0) return;
+      await new Promise((r) => setTimeout(r, Math.min(250, left)));
+    }
+  };
+
   // Normalize a source for exact comparison: drop scheme, www., trailing slashes; lowercase.
   const norm = (s) => s.trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+  const hostOf = (s) => norm(s).split(/[/?#]/)[0] || '(empty)';
+  const sameSources = (a, b) => a.slice().sort().join('\n') === b.slice().sort().join('\n');
   const csrf = () => document.querySelector('meta[name="csrf-token"]')?.content || '';
+
+  function setBusy(b) {
+    running = b;
+    ['sc-preview', 'sc-apply', 'sc-restore'].forEach((id) => { $(id).disabled = b; });
+  }
+
+  // Runs one operation at a time.
+  async function guarded(fn, ...args) {
+    if (running) return log('Something is already running. Wait for it to finish or press Stop.');
+    stopFlag = false;
+    delay = DELAY;
+    setBusy(true);
+    try { await fn(...args); }
+    catch (e) { log('Unexpected error: ' + e.message); }
+    finally { setBusy(false); }
+  }
 
   // ---------- remembered settings ----------
   const FIELDS = ['sc-user', 'sc-tags', 'sc-exact', 'sc-regex', 'sc-reason'];
+  const currentMode = () => document.querySelector('input[name=sc-mode]:checked').value;
   function saveSettings() {
-    const s = { mode: document.querySelector('input[name=sc-mode]:checked').value, deleted: $('sc-deleted').checked };
+    const s = { mode: currentMode(), deleted: $('sc-deleted').checked };
     FIELDS.forEach((id) => (s[id] = $(id).value));
     GM_setValue('settings', JSON.stringify(s));
   }
@@ -214,6 +266,7 @@
       catch (e) {
         const retryable = e.status === undefined || e.status === 429 || e.status >= 500;
         if (!retryable || attempt >= MAX_RETRIES || stopFlag) throw e;
+        if (e.status === 429) delay = Math.min(Math.round(delay * 1.5), MAX_DELAY); // slow down for the rest of the run
         const ms = e.retryAfter || wait;
         log(`  ... ${label}: ${e.message}, retrying in ${Math.round(ms / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`);
         await sleep(ms);
@@ -249,139 +302,277 @@
       if (!posts.length) return;
       yield* posts;
       page = 'b' + posts[posts.length - 1].id;
-      await sleep(DELAY);
+      await sleep(delay);
     }
   }
 
   // ---------- backups ----------
-  function downloadJSON(data, label) {
+  // Backup format (v2): { version, site, label, time, posts: { [id]: { original: [...], after: [...] } } }
+  // Older (v1) files are a flat { [id]: { original: [...] } } with no site information.
+  function downloadJSON(entry) {
+    const safe = (s) => String(s || 'x').replace(/[^\w.-]+/g, '_');
+    const site = entry.site ? new URL(entry.site).hostname : 'unknown-site';
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
-    a.download = `sources_backup_${label || 'user'}_${Date.now()}.json`;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(entry, null, 2)], { type: 'application/json' }));
+    a.href = url;
+    a.download = `sources_backup_${safe(site)}_${safe(entry.label)}_${Date.now()}.json`;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  function loadBackups() {
+    try {
+      const list = JSON.parse(GM_getValue('appliedBackups', '[]'));
+      return Array.isArray(list) ? list : [];
+    } catch { return []; }
+  }
+
+  // Replaces the entry for this run if already saved, otherwise adds it; keeps the newest MAX_BACKUPS.
+  function persistBackup(entry) {
+    if (!Object.keys(entry.posts).length) return;
+    const list = loadBackups().filter((b) => b.time !== entry.time);
+    list.unshift(entry);
+    GM_setValue('appliedBackups', JSON.stringify(list.slice(0, MAX_BACKUPS)));
   }
 
   function downloadBackup() {
-    let saved = null;
-    try { saved = JSON.parse(GM_getValue('appliedBackup', 'null')); } catch { /* ignore */ }
-    if (saved && Object.keys(saved.data).length) {
-      log(`Downloading backup of the last Apply (${Object.keys(saved.data).length} posts, ${new Date(saved.time).toLocaleString()}).`);
-      return downloadJSON(saved.data, saved.label);
+    const mine = loadBackups().find((b) => b.site === SITE);
+    if (mine) {
+      log(`Downloading backup of the last Apply on ${SITE} (${Object.keys(mine.posts).length} posts, ${new Date(mine.time).toLocaleString()}).`);
+      return downloadJSON(mine);
     }
-    if (Object.keys(previewBackup).length) {
-      log('No saved Apply backup; downloading the last preview list instead.');
-      return downloadJSON(previewBackup, 'preview');
+    let legacy = null;
+    try { legacy = JSON.parse(GM_getValue('appliedBackup', 'null')); } catch { /* ignore */ }
+    if (legacy && legacy.data && Object.keys(legacy.data).length) {
+      log('No v1.4 backup for this site. Downloading a pre-1.4 backup instead. It has NO site information, so it may belong to a different site.');
+      return downloadJSON({ version: 2, site: null, label: legacy.label, time: legacy.time, posts: legacy.data });
     }
-    log('No backup yet. Run Apply first.');
+    log('No applied backup for this site yet. Run Preview, then Apply.');
   }
 
-  // ---------- main run ----------
-  async function run(apply) {
-    stopFlag = false;
-    const user = $('sc-user').value.trim().replace(/ /g, '_');
-    const extra = $('sc-tags').value.trim();
-    const mode = document.querySelector('input[name=sc-mode]:checked').value;
-    const reason = $('sc-reason').value.trim() || 'Removing invalid sources';
-    if (!user && !extra) return log('Enter a username or some search tags.');
+  // Accepts v2 and legacy v1 files. Returns { site, posts } or { error }.
+  function normalizeBackup(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'Invalid backup file (unexpected structure).' };
+    const isV2 = raw.posts && typeof raw.posts === 'object';
+    const posts = isV2 ? raw.posts : raw;
+    const bad = Object.keys(posts).filter((id) => {
+      const e = posts[id];
+      return !/^\d+$/.test(id) || !e || !Array.isArray(e.original) || !e.original.every((s) => typeof s === 'string');
+    });
+    if (bad.length) return { error: `Invalid backup file: ${bad.length} malformed entries (first: ${bad[0]}). Nothing was changed.` };
+    return { site: isV2 ? (raw.site || null) : null, posts };
+  }
 
-    let re = null;
-    let exactMatch = null;
-    if (mode === 'exact') {
-      const lines = $('sc-exact').value.split('\n').map(norm).filter(Boolean);
-      if (!lines.length) return log('Enter at least one source to remove.');
+  // ---------- run: preview & apply ----------
+  const currentSpec = () => ({
+    site: SITE,
+    user: $('sc-user').value.trim().replace(/ /g, '_'),
+    extra: $('sc-tags').value.trim(),
+    mode: currentMode(),
+    exact: $('sc-exact').value,
+    regex: $('sc-regex').value,
+    deleted: $('sc-deleted').checked,
+  });
+  const buildQuery = (spec) => [spec.user && `user:${spec.user}`, spec.extra, spec.deleted && 'status:any'].filter(Boolean).join(' ');
+
+  // Returns { filter(oldSources) -> keptSources } or { error }.
+  function buildFilter(spec) {
+    if (spec.mode === 'all') return { filter: () => [] };
+    if (spec.mode === 'exact') {
+      const lines = spec.exact.split('\n').map(norm).filter(Boolean);
+      if (!lines.length) return { error: 'Enter at least one source to remove.' };
       // each line: plain text must match the whole source; * matches any characters
       const regexes = lines.map((l) =>
         new RegExp('^' + l.split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$'));
-      exactMatch = (s) => regexes.some((r) => r.test(s));
+      return { filter: (old) => old.filter((s) => !regexes.some((r) => r.test(norm(s)))) };
     }
-    if (mode === 'match') {
-      if (!$('sc-regex').value) return log('Enter a regex or choose another mode.');
-      try { re = new RegExp($('sc-regex').value, 'i'); } catch (e) { return log('Bad regex: ' + e.message); }
-    }
+    if (!spec.regex) return { error: 'Enter a regex or choose another mode.' };
+    let re;
+    try { re = new RegExp(spec.regex, 'i'); } catch (e) { return { error: 'Bad regex: ' + e.message }; }
+    return { filter: (old) => old.filter((s) => !re.test(s)) };
+  }
 
-    const query = [user && `user:${user}`, extra, $('sc-deleted').checked && 'status:any'].filter(Boolean).join(' ');
-    if (apply && !confirm(`Apply changes to posts matching:\n${query}\n\nRun a preview first if you haven't.`)) return;
+  async function preview() {
+    const spec = currentSpec();
+    plan = null;
+    if (!spec.user && !spec.extra) return log('Enter a username or some search tags.');
+    if (/(^|\s)-?order:/i.test(spec.extra)) return log('Remove the order: tag from the extra tags. Paging only works with the default order.');
+    const f = buildFilter(spec);
+    if (f.error) return log(f.error);
+    const query = buildQuery(spec);
 
-    const runBackup = {};
-    let scanned = 0, changed = 0, failed = 0, removedCount = 0, unsaved = 0;
-    const label = user || 'search';
-    const status = () => {
-      $('sc-status').textContent = `scanned ${scanned} · affected ${changed} · sources removed ${removedCount}` +
-        (failed ? ` · failed ${failed}` : '');
-    };
-    const saveBackup = () => {
-      if (apply && Object.keys(runBackup).length) {
-        GM_setValue('appliedBackup', JSON.stringify({ label, time: Date.now(), data: runBackup }));
-      }
-      unsaved = 0;
-    };
+    const items = [];
+    const domains = new Map();
+    let scanned = 0, removedCount = 0, errored = false;
+    const status = () => setStatus(`scanned ${scanned} · affected ${items.length} · sources to remove ${removedCount}`);
 
-    log(`--- ${apply ? 'APPLY' : 'PREVIEW'}: ${query} ---`);
+    log(`--- PREVIEW: ${query} ---`);
     try {
       for await (const post of fetchPosts(query)) {
         if (stopFlag) break;
         scanned++;
         const old = post.sources || [];
         if (old.length) {
-          const keep = mode === 'all' ? []
-            : mode === 'exact' ? old.filter((s) => !exactMatch(norm(s)))
-            : old.filter((s) => !re.test(s));
+          const keep = f.filter(old);
           if (keep.length !== old.length) {
-            changed++;
+            const gone = old.filter((s) => !keep.includes(s));
+            items.push({ id: post.id, old, keep });
             removedCount += old.length - keep.length;
-            runBackup[post.id] = { original: old };
-            log(`#${post.id}: ${old.length} -> ${keep.length}  removed: ${old.filter((s) => !keep.includes(s)).join(' , ')}`);
-            if (apply) {
-              try { await updateSources(post.id, old, keep, reason); }
-              catch (e) { failed++; log(`  !! #${post.id} failed: ${e.message}`); }
-              if (++unsaved >= 20) saveBackup();
-              await sleep(DELAY);
-            }
+            gone.forEach((s) => { const h = hostOf(s); domains.set(h, (domains.get(h) || 0) + 1); });
+            log(`#${post.id}: ${old.length} -> ${keep.length}  removed: ${gone.join(' , ')}`);
           }
         }
         status();
       }
     } catch (e) {
+      errored = true;
       log('Error: ' + e.message);
+    }
+    status();
+
+    plan = {
+      spec, signature: JSON.stringify(spec), query, items, scanned,
+      removed: removedCount, partial: stopFlag || errored, time: Date.now(),
+    };
+    log(`DRY RUN: scanned ${scanned}, affected ${items.length}, sources to remove ${removedCount}` +
+      `${plan.partial ? ' (INCOMPLETE: stopped early or hit an error)' : ''}.`);
+    if (domains.size) {
+      const top = [...domains.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+      log('Removed sources by domain:\n' + top.map(([h, n]) => `  ${h}  x${n}`).join('\n') +
+        (domains.size > top.length ? `\n  ... and ${domains.size - top.length} more domains` : ''));
+    }
+    if (items.length) log('Happy with this? Press "Apply previewed changes".');
+  }
+
+  async function apply() {
+    if (!plan || !plan.items.length) return log('Nothing to apply. Run Preview first.');
+    const spec = currentSpec();
+    if (JSON.stringify(spec) !== plan.signature) return log('Settings changed since the last preview. Run Preview again first.');
+
+    const modeLabel = { exact: 'remove exact sources', match: 'remove sources matching regex', all: 'REMOVE ALL SOURCES' }[spec.mode];
+    const summary = `Query: ${plan.query}\nMode: ${modeLabel}\nPosts to edit: ${plan.items.length}\nSources to remove: ${plan.removed}` +
+      (plan.partial ? '\n(The preview was incomplete; only the posts it listed will be changed.)' : '');
+    if (spec.mode === 'all') {
+      const answer = prompt(`${summary}\n\nThis removes EVERY source from these posts. Type REMOVE ALL to continue.`);
+      if ((answer || '').trim() !== 'REMOVE ALL') return log('Cancelled.');
+    } else if (!confirm(`${summary}\n\nApply these changes?`)) {
+      return;
+    }
+
+    const reason = $('sc-reason').value.trim() || 'Removing invalid sources';
+    const label = spec.user || 'search';
+    const entry = { version: 2, site: SITE, label, time: Date.now(), posts: {} };
+    const todo = plan.items;
+    let done = 0, failed = 0, removedCount = 0, consecutive = 0, unsaved = 0, aborted = false;
+    const status = () => setStatus(`edited ${done}/${todo.length} · sources removed ${removedCount}` + (failed ? ` · failed ${failed}` : ''));
+
+    log(`--- APPLY: ${plan.query} (${todo.length} posts) ---`);
+    try {
+      for (const it of todo) {
+        if (stopFlag) break;
+        try {
+          await updateSources(it.id, it.old, it.keep, reason);
+          // Only successful edits go into the backup.
+          entry.posts[it.id] = { original: it.old, after: it.keep };
+          done++;
+          removedCount += it.old.length - it.keep.length;
+          consecutive = 0;
+          log(`#${it.id} updated (${it.old.length} -> ${it.keep.length})`);
+          if (++unsaved >= 20) { persistBackup(entry); unsaved = 0; }
+        } catch (e) {
+          failed++;
+          consecutive++;
+          log(`  !! #${it.id} failed: ${e.message}`);
+          if (consecutive >= MAX_CONSECUTIVE_FAILS) {
+            aborted = true;
+            log(`Aborting: ${MAX_CONSECUTIVE_FAILS} edits failed in a row. Check that you are still logged in, then run Preview again.`);
+            break;
+          }
+        }
+        status();
+        await sleep(delay);
+      }
     } finally {
       status();
-      if (apply) saveBackup(); else previewBackup = runBackup;
+      persistBackup(entry);
     }
 
-    log(`${apply ? 'APPLIED' : 'DRY RUN'}: scanned ${scanned}, affected ${changed}, sources removed ${removedCount}` +
-      `${failed ? ', failed ' + failed : ''}${stopFlag ? ' (stopped early)' : ''}.`);
-    if (apply && changed) {
+    log(`APPLIED: edited ${done}/${todo.length}, sources removed ${removedCount}` +
+      `${failed ? ', failed ' + failed : ''}${stopFlag ? ' (stopped early)' : ''}${aborted ? ' (aborted)' : ''}.`);
+    if (done) {
       log('Backup saved in the browser and downloaded as a file.');
-      downloadJSON(runBackup, label);
+      downloadJSON(entry);
     }
+    plan = null; // the preview is used up; run Preview again to check for leftovers
+    if (done < todo.length) log('Run Preview again to pick up the posts that were not edited.');
   }
 
+  // ---------- restore ----------
   async function restore(file) {
-    let backup;
-    try { backup = JSON.parse(await file.text()); } catch { return log('Invalid backup file.'); }
-    const ids = Object.keys(backup);
-    if (!confirm(`Restore original sources on ${ids.length} posts?`)) return;
-    stopFlag = false;
-    log(`--- RESTORE ${ids.length} posts ---`);
-    let done = 0;
+    let raw;
+    try { raw = JSON.parse(await file.text()); } catch { return log('Invalid backup file (not JSON).'); }
+    const b = normalizeBackup(raw);
+    if (b.error) return log(b.error);
+    if (b.site && b.site !== SITE) return log(`This backup is from ${b.site}, but you are on ${SITE}. Open the right site to restore it. Nothing was changed.`);
+    const ids = Object.keys(b.posts);
+    if (!ids.length) return log('The backup is empty.');
+    if (!b.site && !confirm(`This backup has no site information (it was made by an older version).\nMake sure it was made on ${SITE}; otherwise it will edit unrelated posts.\n\nContinue?`)) return;
+    const force = $('sc-force').checked;
+    if (!confirm(`Restore original sources on ${ids.length} posts?` +
+      (force ? '\n\nForce is ON: edits made after the cleanup will be overwritten.' : '\n\nPosts edited since the cleanup will be skipped.'))) return;
+
+    log(`--- RESTORE ${ids.length} posts${force ? ' (force)' : ''} ---`);
+    let restored = 0, skipped = 0, failed = 0, consecutive = 0;
+    const status = () => setStatus(`restored ${restored} · skipped ${skipped}` + (failed ? ` · failed ${failed}` : '') + ` · of ${ids.length}`);
     for (const id of ids) {
       if (stopFlag) break;
+      const entry = b.posts[id];
       try {
         const cur = (await getJSON(`/posts/${id}.json`)).post.sources || [];
-        await updateSources(id, cur, backup[id].original, 'Restoring sources (cleanup reverted)');
-        log(`#${id} restored (${++done}/${ids.length})`);
-      } catch (e) { log(`  !! #${id} failed: ${e.message}`); }
-      await sleep(DELAY);
+        if (sameSources(cur, entry.original)) {
+          skipped++;
+          log(`#${id} already has the original sources, skipped`);
+        } else if (!force && Array.isArray(entry.after) && !sameSources(cur, entry.after)) {
+          skipped++;
+          log(`#${id} was edited after the cleanup, skipped (tick "Force restore" to overwrite)`);
+        } else {
+          await updateSources(id, cur, entry.original, 'Restoring sources (cleanup reverted)');
+          restored++;
+          log(`#${id} restored (${restored}/${ids.length})`);
+        }
+        consecutive = 0;
+      } catch (e) {
+        failed++;
+        consecutive++;
+        log(`  !! #${id} failed: ${e.message}`);
+        if (consecutive >= MAX_CONSECUTIVE_FAILS) {
+          log(`Aborting: ${MAX_CONSECUTIVE_FAILS} failures in a row. Check that you are still logged in.`);
+          break;
+        }
+      }
+      status();
+      await sleep(delay);
     }
-    log('Restore finished.');
+    log(`Restore finished: restored ${restored}, skipped ${skipped}${failed ? ', failed ' + failed : ''}${stopFlag ? ' (stopped early)' : ''}.`);
   }
 
-  $('sc-preview').onclick = () => run(false);
-  $('sc-apply').onclick = () => run(true);
-  $('sc-stop').onclick = () => { stopFlag = true; log('Stopping...'); };
+  // ---------- wiring ----------
+  $('sc-preview').onclick = () => guarded(preview);
+  $('sc-apply').onclick = () => guarded(apply);
+  $('sc-stop').onclick = () => {
+    if (!running) return log('Nothing is running.');
+    stopFlag = true;
+    log('Stopping...');
+  };
   $('sc-download').onclick = downloadBackup;
   $('sc-restore').onclick = () => $('sc-file').click();
-  $('sc-file').onchange = (e) => e.target.files[0] && restore(e.target.files[0]);
+  $('sc-file').onchange = (e) => {
+    const f = e.target.files[0];
+    e.target.value = ''; // so picking the same file again still fires change
+    if (f) guarded(restore, f);
+  };
   $('sc-copylog').onclick = () => { GM_setClipboard($('sc-log').textContent); log('Log copied.'); };
   $('sc-clearlog').onclick = () => { $('sc-log').textContent = ''; };
 })();
