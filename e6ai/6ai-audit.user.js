@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.21
+// @version      1.24
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -152,15 +152,15 @@
   }
 
   // Guesses from the link's shape what it points at: 'invalid' (not a web link at all), 'submission' (a specific post/artwork page),
-  // 'profile' (a profile, channel, gallery or other landing page), 'invite' (a Discord or Telegram invite/chat link), 'home' (just the site's front page) or 'unknown'.
+  // 'profile' (a profile, channel, gallery or other landing page), 'invite' (a Discord invite or Telegram link), 'home' (just the site's front page) or 'unknown'.
   function classifySource(src) {
     const p = parseSource(src);
     if (!p) return 'invalid';   // not a web link at all (plain words, a version number, two links in one line, ...)
     const { host, segs, q } = p, n = segs.length, s0 = (segs[0] || '').toLowerCase();
     const on = (...d) => d.some((x) => host === x || host.endsWith('.' + x));
-    // Discord and Telegram: invites, server/channel links and t.me links all count as 'invite'
+    // Discord invites and Telegram links count as 'invite' (discord.com/channels/... message links do not)
     if (on('discord.gg', 'dsc.gg', 'discord.me', 'discord.link', 't.me', 'telegram.me', 'telegram.dog')) return n ? 'invite' : 'home';
-    if (['discord.com', 'discordapp.com', 'ptb.discord.com', 'canary.discord.com'].includes(host) && ['invite', 'channels', 'users', 'servers', 'events', 'discovery', 'template', 'oauth2'].includes(s0)) return 'invite';
+    if (['discord.com', 'discordapp.com', 'ptb.discord.com', 'canary.discord.com'].includes(host) && s0 === 'invite') return 'invite';
     if (!n) return p.search ? 'unknown' : 'home';
 
     if (on('x.com', 'twitter.com')) {
