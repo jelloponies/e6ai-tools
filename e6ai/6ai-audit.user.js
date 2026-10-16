@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.19
+// @version      1.21
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -681,10 +681,10 @@
     }
     if (P && P.sources) {
       const SS = P.sources, kindText = { profile: ' (looks like a profile or landing page)', home: ' (just a site front page)', invite: ' (an invite link)' };
-      if (SS.invalidPosts >= INVALID_SOURCE_FLAG) f.push(`${SS.invalidPosts} of their posts ${SS.invalidPosts === 1 ? 'has' : 'have'} a source that isn't a valid web link (most common: "${SS.invalidTop.url}", ${SS.invalidTop.ids.length} post${SS.invalidTop.ids.length === 1 ? '' : 's'}). See "Sources worth checking" under Uploads.`);
-      if (SS.sameTop) f.push(`${SS.sameTop.ids.length} of their posts list the identical source ${SS.sameTop.url}${kindText[SS.sameTop.kind] || ''}. See "Sources worth checking" under Uploads.`);
+      if (SS.invalidPosts >= INVALID_SOURCE_FLAG) f.push(`${SS.invalidPosts} of their posts ${SS.invalidPosts === 1 ? 'has' : 'have'} a source that isn't a valid web link (most common: "${SS.invalidTop.url}", ${SS.invalidTop.ids.length} post${SS.invalidTop.ids.length === 1 ? '' : 's'}).`);
+      if (SS.sameTop) f.push(`${SS.sameTop.ids.length} of their posts list the identical source ${SS.sameTop.url}${kindText[SS.sameTop.kind] || ''}.`);
       if (SS.landingPosts >= PROFILE_SOURCE_FLAG) f.push(`${SS.landingPosts} of their posts ${SS.landingPosts === 1 ? 'has' : 'have'} a source that looks like a profile or landing page.`);
-      if (SS.chatPosts >= CHAT_SOURCE_FLAG) f.push(`${SS.chatPosts} of their posts ${SS.chatPosts === 1 ? 'has' : 'have'} a source that is an invite link. See "Sources worth checking" under Uploads.`);
+      if (SS.chatPosts >= CHAT_SOURCE_FLAG) f.push(`${SS.chatPosts} of their posts ${SS.chatPosts === 1 ? 'has' : 'have'} a source that is an invite link.`);
     }
     if (P && P.maxPerHour >= 50) f.push(`Uploaded up to ${P.maxPerHour} posts within a single hour.`);
     if (C) {
