@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.6
+// @version      1.10
 // @author       Jelloponies
-// @description  Admin tool: on a user's profile page, audit their uploads, comments and votes and compare votes to their blacklist. Movable, resizable window.
+// @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
 // @match        https://e6ai.net/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
@@ -18,6 +18,7 @@
   let stopFlag = false;
   let comments = [];       // loaded comments, used by the sample view
   let state = {};          // results of the current audit
+  let userInfo = new Map();  // voter id -> user JSON (names, account age)
   let blSort = { key: 'total', dir: -1 };   // sort order of the blacklist entries table
 
   // ---- pure helpers begin ----
@@ -201,6 +202,19 @@
     }
     return A;
   }
+  // Groups votes that other people cast on this user's posts/comments by voter.
+  function analyzeReceived(votes, idKey) {
+    const R = { up: 0, down: 0, byVoter: {} };
+    for (const v of votes) {
+      const dir = v.score > 0 ? 'up' : v.score < 0 ? 'down' : null;
+      if (!dir) continue;
+      R[dir]++;
+      const e = (R.byVoter[v.user_id] = R.byVoter[v.user_id] || { up: 0, down: 0, upItems: [], downItems: [] });
+      e[dir]++;
+      e[dir + 'Items'].push(v[idKey]);
+    }
+    return R;
+  }
   // ---- pure helpers end ----
 
   // Only active on a user's profile page (/users/<id>); the audited user is that profile.
@@ -251,7 +265,7 @@
       font-family: monospace; font-size: 11px; padding: 4px; white-space: pre-wrap; border: 1px solid var(--ua-foreground); }
     .ua-flags { background: var(--ua-foreground); border: 1px solid var(--ua-accent); border-radius: 6px; padding: 6px 10px; margin-top: 10px; }
     .ua-flags ul { margin: 4px 0 0 18px; padding: 0; }
-    .ua-c { border-bottom: 1px solid var(--ua-foreground); padding: 5px 0; }
+    .ua-c { border-bottom: 1px solid var(--ua-foreground); padding: 5px 0; color: var(--ua-text); font-size: 13px; }
     .ua-c .meta { font-size: 11px; color: var(--ua-muted); }
     #ua-panel .ua-pos { color: var(--ua-pos); font-weight: bold; }
     #ua-panel .ua-zero { color: var(--ua-zero); font-weight: bold; }
@@ -266,12 +280,13 @@
       <label>From <input type="date" id="ua-from"></label>
       <label>To <input type="date" id="ua-to"></label>
       <button id="ua-7">7d</button><button id="ua-30">30d</button><button id="ua-90">90d</button><button id="ua-all">All</button>
-      <div class="hint">Timespan applies to comments and votes. Uploads are always the whole account.</div>
+      <div class="hint">Timespan applies to comments and votes. Uploads are always the whole account. Max votes applies to each vote list separately.</div>
     </div>
     <div class="row">
       <label><input type="checkbox" id="ua-do-posts" checked> Uploads</label>
       <label><input type="checkbox" id="ua-do-comments" checked> Comments</label>
-      <label><input type="checkbox" id="ua-do-votes" checked> Votes</label>
+      <label><input type="checkbox" id="ua-do-votes" checked> Votes cast</label>
+      <label><input type="checkbox" id="ua-do-received" checked> Votes received</label>
     </div>
     <div class="row">
       <label>Max comments <input type="number" id="ua-max-comments" value="1000" min="10" style="width:70px"></label>
@@ -284,7 +299,7 @@
     <div id="ua-status"></div>
     <div id="ua-log"></div>
     <div id="ua-report"></div>
-    <details open>
+    <details>
       <summary>Comment sample</summary>
       <div class="row">
         <label>Sort
@@ -300,7 +315,7 @@
         <label>Contains <input type="text" id="ua-c-text" style="width:130px"></label>
         <label>Show <input type="number" id="ua-c-n" value="20" min="1" style="width:55px"></label>
       </div>
-      <div id="ua-comments" class="hint">Run an audit with Comments ticked to load them.</div>
+      <div id="ua-comments"><span class="hint">Run an audit with Comments ticked to load them.</span></div>
     </details>
   `;
   const toggle = document.createElement('button');
@@ -384,7 +399,7 @@
 
   // ---------- remembered settings ----------
   const FIELDS = ['ua-from', 'ua-to', 'ua-max-comments', 'ua-max-votes'];
-  const BOXES = ['ua-do-posts', 'ua-do-comments', 'ua-do-votes'];
+  const BOXES = ['ua-do-posts', 'ua-do-comments', 'ua-do-votes', 'ua-do-received'];
   function saveSettings() {
     const s = {};
     FIELDS.forEach((id) => (s[id] = $(id).value));
@@ -498,7 +513,7 @@
   const table = (head, rows) => rows.length
     ? `<table><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</table>`
     : '<div class="hint">Nothing to show.</div>';
-  const section = (title, body, open) => `<details${open ? ' open' : ''}><summary>${esc(title)}</summary>${body}</details>`;
+  const section = (title, body) => `<details><summary>${esc(title)}</summary>${body}</details>`;
 
   function buildFlags() {
     const f = [];
@@ -556,6 +571,20 @@
         if (C && C.total >= 100) parts.push(`${C.total} comments`);
         if (parts.length) f.push(`The account is only ${Math.max(1, Math.round(age))} day(s) old but already has ${parts.join(', ')}.`);
       }
+    }
+    const isNew = (id) => { const u = userInfo.get(String(id)), t = u && Date.parse(u.created_at); return !!t && Date.now() - t <= 30 * 864e5; };
+    const nameOf = (id) => (userInfo.get(String(id)) || {}).name || 'user #' + id;
+    for (const [what, R] of [['posts', state.recvPosts && state.recvPosts.A], ['comments', state.recvComments && state.recvComments.A]]) {
+      if (!R) continue;
+      const vs = Object.entries(R.byVoter);
+      if (R.up >= 20) {
+        const top3 = vs.map(([, v]) => v.up).sort((a, b) => b - a).slice(0, 3).reduce((a, b) => a + b, 0);
+        if (top3 / R.up >= 0.5) f.push(`3 voters account for ${pct(top3, R.up)}% of the upvotes on their ${what} (${top3} of ${R.up}).`);
+      }
+      const td = [...vs].sort((a, b) => b[1].down - a[1].down)[0];
+      if (td && td[1].down >= 10 && td[1].down / R.down >= 0.25) f.push(`${pct(td[1].down, R.down)}% of the downvotes on their ${what} (${td[1].down}) came from one voter (${nameOf(td[0])}).`);
+      const fresh = vs.filter(([id, v]) => v.up >= 5 && isNew(id));
+      if (fresh.length) f.push(`${fresh.length} frequent upvoter(s) on their ${what} have accounts under 30 days old: ${fresh.slice(0, 5).map(([id, v]) => `${nameOf(id)} (${v.up})`).join(', ')}.`);
     }
     return f;
   }
@@ -657,6 +686,37 @@
     return section('Blacklist check', body, true);
   }
 
+  function receivedRows(R, key) {
+    return Object.entries(R.byVoter).filter(([, v]) => v[key] > 0)
+      .sort((a, b) => b[1][key] - a[1][key] || (b[1].up + b[1].down) - (a[1].up + a[1].down)).slice(0, 10)
+      .map(([id, v]) => {
+        const u = userInfo.get(String(id)), t = u && Date.parse(u.created_at);
+        const joined = t ? (Date.now() - t <= 30 * 864e5 ? `<span class="ua-neg">${esc(day(t))} (new)</span>` : esc(day(t))) : '?';
+        const link = R.kind === 'comments' ? (x) => commentLink({ id: x }) : postLink;
+        return [userLink(id, u && u.name), joined, drill(upN(v.up), v.upItems, link), drill(downN(v.down), v.downItems, link),
+          num(v.up - v.down, sgnText(v.up - v.down)), pct(v[key], R[key]) + '%'];
+      });
+  }
+
+  function secReceived(title, kind, slot) {
+    if (!slot) return '';
+    if (slot.error) return section(title, `<div>${esc(slot.error)}</div>`);
+    const R = Object.assign({ kind }, slot.A), tot = R.up + R.down;
+    if (!tot) return section(title, '<div class="hint">No votes in this timespan.</div>');
+    const vs = Object.values(R.byVoter);
+    const share = (key) => (R[key] ? pct(vs.map((v) => v[key]).sort((a, b) => b - a).slice(0, 3).reduce((a, b) => a + b, 0), R[key]) + '%' : 'n/a');
+    const empty = '<div class="hint">None in this timespan.</div>', head = ['Voter', 'Joined', 'Up', 'Down', 'Net'];
+    const dr = receivedRows(R, 'down'), ur = receivedRows(R, 'up');
+    return section(title, table(['Measure', 'Value'], [
+      ['Votes received', `${tot} (${upN(R.up)} / ${downN(R.down)})`],
+      ['Different voters', vs.length],
+      ['Top 3 voters\' share of upvotes / downvotes', `${share('up')} / ${share('down')}`],
+    ]) + `<div class="hint">Click an Up or Down number to list the ${kind}. Names and join dates are looked up for the top voters only.</div>` +
+      `<div class="hint">${esc(slot.note || '')}</div>` +
+      '<b>Who upvotes them most</b>' + (ur.length ? table([...head, 'Share of upvotes'], ur) : empty) +
+      '<b>Who downvotes them most</b>' + (dr.length ? table([...head, 'Share of downvotes'], dr) : empty));
+  }
+
   function secTags() {
     const V = state.votes && state.votes.A;
     if (!V || !V.down) return '';
@@ -696,7 +756,8 @@
     root.innerHTML =
       (flags.length ? `<div class="ua-flags"><b>Worth a look</b> <span class="hint">(prompts for review, not verdicts)</span><ul>${flags.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : '') +
       secOverview() + (state.posts ? secPosts() : '') + (state.comments ? secComments() : '') +
-      (state.votes ? secVotes() + secBlacklist() + secTags() : '') + secCommentVotes();
+      (state.votes ? secVotes() + secBlacklist() + secTags() : '') + secCommentVotes() +
+      secReceived('Votes on their posts', 'posts', state.recvPosts) + secReceived('Votes on their comments', 'comments', state.recvComments);
     const ds = root.querySelectorAll('details');
     if (ds.length === opens.length) ds.forEach((d, i) => { d.open = opens[i]; });
   }
@@ -704,7 +765,7 @@
   // ---------- comment sample ----------
   function renderComments() {
     const box = $('ua-comments');
-    if (!comments.length) { box.textContent = 'No comments loaded.'; return; }
+    if (!comments.length) { box.innerHTML = '<span class="hint">No comments loaded.</span>'; return; }
     const txt = $('ua-c-text').value.trim().toLowerCase();
     const maxRaw = $('ua-c-max').value;
     let list = comments.filter((c) => (!txt || String(c.body || '').toLowerCase().includes(txt)) &&
@@ -733,6 +794,7 @@
     $('ua-log').textContent = '';
     comments = [];
     state = {};
+    userInfo = new Map();
     renderComments();
     const from = $('ua-from').value ? new Date($('ua-from').value + 'T00:00:00').getTime() : null;
     const to = $('ua-to').value ? new Date($('ua-to').value + 'T23:59:59.999').getTime() : null;
@@ -766,6 +828,7 @@
             if (list.length >= 10000) { log('Stopped at 10000 uploads.'); break; }
           }
           state.posts = { stats: postStats(list, Date.now()) };
+          state.uploadIds = list.map((p) => p.id);
           render();
         } catch (e) { log('Uploads failed: ' + e.message); }
       }
@@ -784,6 +847,7 @@
       }
 
       if ($('ua-do-votes').checked && !stopFlag) await auditVotes(user, from, to, maxV);
+      if ($('ua-do-received').checked && !stopFlag) await auditReceived(user, from, to, maxV);
     } catch (e) {
       log('Error: ' + e.message);
     } finally {
@@ -843,6 +907,73 @@
     } catch (e) {
       state.cvotes = { error: e.status === 403 || e.status === 401 || e.status === 404
         ? `Your role can't view comment votes (${e.message}).` : 'Comment votes failed: ' + e.message };
+    }
+    render();
+  }
+
+  // Votes other people cast on this user's posts and comments.
+  // The vote lists only accept a creator filter together with a voter or item filter, so instead of
+  // "votes on posts by X" we ask for votes on batches of X's own post/comment ids (newest first).
+  async function auditReceived(user, from, to, maxV) {
+    const SCAN_CAP = 3000, BATCH = 100;
+    const fail = (e, what) => ({ error: [401, 403, 404].includes(e.status)
+      ? `Your role can't view votes on their ${what} (${e.message}).` : `Votes on their ${what} failed: ${e.message}` });
+
+    async function* uploadIds() {
+      if (state.uploadIds) { for (const id of state.uploadIds) yield id; return; }
+      for await (const p of paged(`/posts.json?tags=${encodeURIComponent(`user:${user.name} status:any`)}&limit=320`, null, null)) yield p.id;
+    }
+    async function* commentIds() {
+      if (comments.length && !from && !to) { for (const c of comments) yield c.id; return; }
+      for await (const c of paged(`/comments.json?group_by=comment&search[creator_id]=${user.id}&limit=100`, null, null)) yield c.id;
+    }
+
+    async function scan(what, endpoint, param, idKey, source) {
+      const votes = [];
+      let scanned = 0, batch = [], full = false;
+      const flush = async () => {
+        if (!batch.length) return;
+        const set = new Set(batch.map(String));
+        const ids = batch.join(',');
+        batch = [];
+        setStatus(`Loading votes on their ${what}: ${scanned} checked, ${votes.length} votes`);
+        for await (const v of paged(`/${endpoint}.json?search[${param}]=${ids}&limit=320`, from, to)) {
+          if (!set.has(String(v[idKey]))) throw new Error('the server returned votes for other items, so the list was not used');
+          votes.push(v);
+          if (votes.length >= maxV) { full = true; break; }
+        }
+      };
+      for await (const id of source()) {
+        if (stopFlag) break;
+        batch.push(id); scanned++;
+        if (batch.length >= BATCH) await flush();
+        if (full || scanned >= SCAN_CAP) break;
+      }
+      if (!full && !stopFlag) await flush();
+      const limited = full ? ' (stopped at the Max votes limit, so older ones may be missing)' : scanned >= SCAN_CAP ? ' (scan limit reached, older ones are not included)' : '';
+      return { A: analyzeReceived(votes, idKey), note: `Covers votes on their ${scanned} most recent ${what}${limited}.` };
+    }
+
+    try {
+      state.recvPosts = await scan('posts', 'post_votes', 'post_id', 'post_id', uploadIds);
+    } catch (e) { state.recvPosts = fail(e, 'posts'); }
+    render();
+    if (stopFlag) return;
+
+    try {
+      state.recvComments = await scan('comments', 'comment_votes', 'comment_id', 'comment_id', commentIds);
+    } catch (e) { state.recvComments = fail(e, 'comments'); }
+    render();
+    if (stopFlag) return;
+
+    // names and account ages for the most active voters
+    const top = (R, key, n) => (R ? Object.entries(R.byVoter).sort((a, b) => b[1][key] - a[1][key]).filter((x) => x[1][key] > 0).slice(0, n).map((x) => x[0]) : []);
+    const P = state.recvPosts && state.recvPosts.A, C = state.recvComments && state.recvComments.A;
+    const ids = [...new Set([...top(P, 'up', 8), ...top(P, 'down', 8), ...top(C, 'up', 5), ...top(C, 'down', 5)])];
+    for (let i = 0; i < ids.length && !stopFlag; i++) {
+      setStatus(`Looking up voters: ${i + 1}/${ids.length}`);
+      try { userInfo.set(String(ids[i]), await getJSON(`/users/${ids[i]}.json`)); } catch { userInfo.set(String(ids[i]), null); }
+      await sleep(DELAY);
     }
     render();
   }
