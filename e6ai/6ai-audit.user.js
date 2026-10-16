@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.11
+// @version      1.13
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -124,6 +124,123 @@
     return null;
   }
 
+  // ---- source checks ----
+  // Tweak these to taste: how many posts must share one identical source before it is listed/flagged,
+  // and how many posts with profile-looking sources trigger the flag.
+  const SAME_SOURCE_MIN = 5, PROFILE_SOURCE_FLAG = 3, INVALID_SOURCE_FLAG = 1;
+
+  function parseSource(src) {
+    if (/\s/.test(String(src).trim())) return null;   // a link never contains spaces (also catches two links in one field)
+    try {
+      const u = new URL(/^[a-z]+:\/\//i.test(src) ? src : 'https://' + src);
+      const host = u.hostname.replace(/^www\./, '').toLowerCase();
+      const tld = host.split('.').pop();
+      if (!host.includes('.') || tld.length < 2 || !/[a-z]/.test(tld)) return null;   // not a real-looking web address
+      const segs = u.pathname.split('/').filter(Boolean).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+      return { host, segs, q: u.searchParams, search: u.search };
+    } catch { return null; }
+  }
+
+  // Same link written differently (http/https, www, trailing slash, #fragment, tracking query) groups together.
+  function normSource(src) {
+    const p = parseSource(src);
+    if (!p) return String(src || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    const keepQuery = /(^|\.)(youtube\.com|pixiv\.net)$/.test(p.host);
+    return p.host + '/' + p.segs.join('/').toLowerCase() + (keepQuery ? p.search.toLowerCase() : '');
+  }
+
+  // Guesses from the link's shape what it points at: 'invalid' (not a web link at all), 'submission' (a specific post/artwork page),
+  // 'profile' (a profile, channel, gallery or other landing page), 'home' (just the site's front page) or 'unknown'.
+  function classifySource(src) {
+    const p = parseSource(src);
+    if (!p) return 'invalid';   // not a web link at all (plain words, a version number, two links in one line, ...)
+    const { host, segs, q } = p, n = segs.length, s0 = (segs[0] || '').toLowerCase();
+    const on = (...d) => d.some((x) => host === x || host.endsWith('.' + x));
+    if (!n) return p.search ? 'unknown' : 'home';
+
+    if (on('x.com', 'twitter.com')) {
+      if (segs.includes('status') || segs.includes('statuses')) return 'submission';
+      if (['i', 'hashtag', 'search', 'explore', 'home', 'intent', 'share', 'messages', 'settings'].includes(s0)) return 'unknown';
+      return n <= 2 ? 'profile' : 'unknown';
+    }
+    if (on('furaffinity.net')) {
+      if (['view', 'full'].includes(s0)) return 'submission';
+      if (['user', 'gallery', 'scraps', 'favorites', 'journals', 'commissions'].includes(s0)) return 'profile';
+      return 'unknown';
+    }
+    if (on('bsky.app')) return s0 === 'profile' ? (segs[2] === 'post' ? 'submission' : 'profile') : 'unknown';
+    if (on('pixiv.net')) {
+      if (segs.includes('artworks') || q.has('illust_id')) return 'submission';
+      if (segs.includes('users') || segs.some((x) => /^member/.test(x))) return 'profile';
+      return 'unknown';
+    }
+    if (on('deviantart.com')) {
+      if (segs.includes('art')) return 'submission';
+      if (['tag', 'search', 'topic', 'watch', 'journal'].includes(s0)) return 'unknown';
+      return n <= 2 ? 'profile' : 'unknown';
+    }
+    if (on('civitai.com')) {
+      if (s0 === 'images' || s0 === 'posts') return 'submission';
+      return s0 === 'user' ? 'profile' : 'unknown';
+    }
+    if (on('redd.it')) return 'submission';
+    if (on('reddit.com')) {
+      if (segs.includes('comments')) return 'submission';
+      return ['user', 'u', 'r'].includes(s0) && n <= 2 ? 'profile' : 'unknown';
+    }
+    if (on('youtu.be')) return 'submission';
+    if (on('youtube.com')) {
+      if (['watch', 'shorts', 'live'].includes(s0)) return 'submission';
+      return s0.startsWith('@') || ['channel', 'c', 'user'].includes(s0) ? 'profile' : 'unknown';
+    }
+    if (on('instagram.com')) {
+      if (['p', 'reel', 'reels', 'tv'].includes(s0)) return 'submission';
+      return n <= 1 && !['explore', 'accounts'].includes(s0) ? 'profile' : 'unknown';
+    }
+    if (on('tumblr.com')) return segs.includes('post') ? 'submission' : 'unknown';
+    if (on('patreon.com')) return s0 === 'posts' ? 'submission' : (n <= 2 ? 'profile' : 'unknown');
+    if (on('discord.gg') || (on('discord.com') && s0 === 'invite')) return 'profile';
+    if (on('frosting.ai')) {
+      if (s0 === 'profile') return segs[2] === 'post' ? 'submission' : 'profile';
+      return s0 === 'user' ? 'profile' : 'unknown';
+    }
+    if (on('e621.net', 'e926.net', 'e6ai.net')) return s0 === 'posts' ? 'submission' : (s0 === 'users' ? 'profile' : 'unknown');
+
+    // any other site: the usual profile-style URL shapes
+    if (['user', 'users', 'u', 'profile', 'profiles', 'member', 'members', 'artist', 'artists', 'creator', 'creators', 'channel', 'author'].includes(s0) && n <= 2) return 'profile';
+    if (s0.startsWith('@') && n <= 1) return 'profile';
+    return 'unknown';
+  }
+
+  // Groups an uploader's posts by identical source. Returns the rows worth looking at: sources shared by
+  // SAME_SOURCE_MIN or more posts, plus any that look like a profile or home page, plus anything that is not a link.
+  function analyzeSources(list) {
+    const groups = new Map();
+    for (const p of list) {
+      const seen = new Set();
+      for (const src of p.sources || []) {
+        const key = normSource(src);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        let g = groups.get(key);
+        if (!g) groups.set(key, (g = { url: src, kind: classifySource(src), ids: [] }));
+        g.ids.push(p.id);
+      }
+    }
+    const all = [...groups.values()].sort((a, b) => b.ids.length - a.ids.length);
+    const landing = (g) => g.kind === 'profile' || g.kind === 'home';
+    const rows = all.filter((g) => g.ids.length >= SAME_SOURCE_MIN || landing(g) || g.kind === 'invalid')
+      .sort((a, b) => (b.kind === 'invalid') - (a.kind === 'invalid') || b.ids.length - a.ids.length);   // non-links first
+    const landingPosts = new Set(), invalidPosts = new Set();
+    for (const g of all) {
+      if (landing(g)) g.ids.forEach((id) => landingPosts.add(id));
+      if (g.kind === 'invalid') g.ids.forEach((id) => invalidPosts.add(id));
+    }
+    return { rows, total: rows.length, landingPosts: landingPosts.size, invalidPosts: invalidPosts.size,
+      invalidTop: all.find((g) => g.kind === 'invalid') || null,
+      sameTop: all[0] && all[0].ids.length >= SAME_SOURCE_MIN ? all[0] : null };
+  }
+
   function postStats(list, now) {
     const st = { total: list.length, active: 0, pending: 0, flagged: 0, deleted: 0, ratings: {}, noSource: 0,
       malformed: 0, domains: {}, scoreSum: 0, favSum: 0, last7: 0, last30: 0, tags: {}, maxPerHour: 0,
@@ -150,6 +267,7 @@
       for (const x of [...(tg.general || []), ...(tg.species || [])]) st.tags[x] = (st.tags[x] || 0) + 1;
     }
     st.maxPerHour = maxInWindow(times, 3600000);
+    st.sources = analyzeSources(list.filter((p) => !(p.flags && p.flags.deleted)));
     for (const [d, n] of Object.entries(st.domains)) if (n > st.topDomainCount) { st.topDomain = d; st.topDomainCount = n; }
     return st;
   }
@@ -523,7 +641,12 @@
     if (P && P.total >= 20) {
       if (P.topDomain && P.topDomainCount / P.total >= 0.5) f.push(`${pct(P.topDomainCount, P.total)}% of their uploads list the same source domain (${P.topDomain}).`);
       if (P.deleted / P.total >= 0.25) f.push(`${pct(P.deleted, P.total)}% of their uploads are deleted.`);
-      if (P.noSource / P.total >= 0.5) f.push(`${pct(P.noSource, P.total)}% of their uploads have no source.`);
+    }
+    if (P && P.sources) {
+      const SS = P.sources, kindText = { profile: ' (looks like a profile or landing page)', home: ' (just a site front page)' };
+      if (SS.invalidPosts >= INVALID_SOURCE_FLAG) f.push(`${SS.invalidPosts} of their posts have a source that isn't a valid web link (most common: "${SS.invalidTop.url}", ${SS.invalidTop.ids.length} post${SS.invalidTop.ids.length === 1 ? '' : 's'}). See "Sources worth checking" under Uploads.`);
+      if (SS.sameTop) f.push(`${SS.sameTop.ids.length} of their posts list the identical source ${SS.sameTop.url}${kindText[SS.sameTop.kind] || ''}. See "Sources worth checking" under Uploads.`);
+      if (SS.landingPosts >= PROFILE_SOURCE_FLAG) f.push(`${SS.landingPosts} of their posts have a source that looks like a profile or landing page instead of the original submission. See "Sources worth checking" under Uploads.`);
     }
     if (P && P.maxPerHour >= 50) f.push(`Uploaded up to ${P.maxPerHour} posts within a single hour.`);
     if (C) {
@@ -598,6 +721,20 @@
     return section('Overview', `<div>${userLink(u.id, u.name)}</div>` + table(['Field', 'Value'], rows), true);
   }
 
+  function sourcesTable(SS) {
+    const kindLabel = { invalid: 'not a valid link', profile: 'profile or landing page', home: 'site front page', submission: 'submission page', unknown: 'unknown' };
+    const rows = SS.rows.slice(0, 30).map((g) => {
+      const link = /^https?:\/\//i.test(g.url)
+        ? `<a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">${esc(g.url.length > 70 ? g.url.slice(0, 67) + '…' : g.url)}</a>`
+        : esc(g.url.length > 70 ? g.url.slice(0, 67) + '…' : g.url);
+      const view = `<a href="/posts?tags=${encodeURIComponent('id:' + g.ids.slice(0, 100).join(','))}" target="_blank">view${g.ids.length > 100 ? ' first 100' : ''}</a>`;
+      return [link, kindLabel[g.kind], g.ids.length, view];
+    });
+    return '<b>Sources worth checking</b>' +
+      `<div class="hint">Anything that isn't a valid web link (listed first), sources shared by ${SAME_SOURCE_MIN}+ posts, and any that look like a profile or landing page instead of the original submission (judged from the link's shape; the script can't open the links, so check a few yourself). Deleted posts are left out.${SS.total > 30 ? ` Showing 30 of ${SS.total}.` : ''}</div>` +
+      (rows.length ? table(['Source', 'Looks like', 'Posts', 'Find posts'], rows) : '<div class="hint">Nothing stands out.</div>');
+  }
+
   function secPosts() {
     const S = state.posts.stats, who = String(state.user.name).replace(/ /g, '_');
     if (!S.total) return section('Uploads', '<div class="hint">No uploads found.</div>');
@@ -612,7 +749,7 @@
       ['No source', `${S.noSource} (${pct(S.noSource, S.total)}%)`],
       ['With a malformed source', S.malformed],
       ['Average score / favorites', `${fnum(S.scoreSum / S.total)} / ${(S.favSum / S.total).toFixed(1)}`],
-    ]) + '<b>Top source domains</b>' + table(['Domain', 'Posts', 'Share'], dom) +
+    ]) + '<b>Top source domains</b>' + table(['Domain', 'Posts', 'Share'], dom) + sourcesTable(S.sources) +
       '<b>Top tags</b>' + table(['Tag', 'Posts'], tags);
     return section('Uploads', body);
   }
