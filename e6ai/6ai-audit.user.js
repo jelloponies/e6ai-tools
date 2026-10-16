@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.17
+// @version      1.19
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -22,6 +22,8 @@
   let state = {};          // results of the current audit
   let userInfo = new Map();  // voter id -> user JSON (names, account age)
   let blSort = { key: 'total', dir: -1 };   // sort order of the blacklist entries table
+  let srcSort = { key: null, dir: 1 };      // sort order of the "Sources worth checking" table (null = default order)
+  const SOURCE_ROWS_MAX = 100;               // most rows shown in that table
 
   // ---- pure helpers begin ----
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -369,14 +371,21 @@
     #ua-panel a { color: var(--ua-link); text-decoration: none; }
     #ua-panel a:hover { color: var(--ua-hover); text-decoration: underline; }
     #ua-panel code { color: var(--ua-text); }
-    #ua-panel th[data-bl-sort] { cursor: pointer; user-select: none; }
-    #ua-panel th[data-bl-sort]:hover { color: var(--ua-hover); }
+    #ua-panel th[data-bl-sort], #ua-panel th[data-src-sort] { cursor: pointer; user-select: none; }
+    #ua-panel th[data-bl-sort]:hover, #ua-panel th[data-src-sort]:hover { color: var(--ua-hover); }
     #ua-panel table { border-collapse: collapse; width: 100%; margin: 4px 0 8px; }
     #ua-panel th, #ua-panel td { border-bottom: 1px solid var(--ua-foreground); padding: 2px 6px; text-align: left; font-size: 12px; vertical-align: top; }
     #ua-panel th { color: #e6e6e6; background: var(--ua-foreground); }
     #ua-panel details { margin-top: 8px; }
     #ua-panel summary { cursor: pointer; font-weight: bold; }
     #ua-panel summary:hover { color: var(--ua-hover); }
+    /* "Sources worth checking": a boxed, accent-coloured bar so it stands out between the plain tables */
+    #ua-panel details.ua-src { margin: 12px 0; border: 1px solid var(--ua-accent); border-radius: 5px; background: var(--ua-foreground); }
+    #ua-panel details.ua-src > summary { padding: 5px 8px; color: var(--ua-accent); }
+    #ua-panel details.ua-src > summary:hover { color: var(--ua-hover); }
+    #ua-panel details.ua-src > :not(summary) { margin-left: 8px; margin-right: 8px; }
+    #ua-panel details.ua-src[open] > summary { border-bottom: 1px solid var(--ua-section-light); margin-bottom: 4px; }
+    #ua-panel details.ua-src > table { width: calc(100% - 16px); margin-bottom: 8px; }
     #ua-panel details.ua-x { display: inline-block; margin: 0; }
     #ua-panel details.ua-x > summary { font-weight: normal; }
     #ua-panel .ua-links { max-width: 330px; max-height: 120px; overflow: auto; line-height: 1.5; }
@@ -752,16 +761,25 @@
 
   function sourcesTable(SS) {
     const kindLabel = { invalid: 'not a valid link', profile: 'profile or landing page', home: 'site front page', invite: 'invite link', submission: 'submission page', unknown: 'unknown' };
-    const rows = SS.rows.slice(0, 30).map((g) => {
+    const { key, dir } = srcSort;
+    const list = SS.rows.slice();
+    if (key) {
+      const val = { source: (g) => g.url.toLowerCase(), kind: (g) => kindLabel[g.kind], posts: (g) => g.ids.length }[key];
+      list.sort((a, b) => (val(a) < val(b) ? -1 : val(a) > val(b) ? 1 : 0) * dir || b.ids.length - a.ids.length);
+    }
+    const rows = list.slice(0, SOURCE_ROWS_MAX).map((g) => {
       const link = /^https?:\/\//i.test(g.url)
         ? `<a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">${esc(g.url.length > 70 ? g.url.slice(0, 67) + '…' : g.url)}</a>`
         : esc(g.url.length > 70 ? g.url.slice(0, 67) + '…' : g.url);
       const view = `<a href="/posts?tags=${encodeURIComponent('id:' + g.ids.slice(0, 100).join(','))}" target="_blank">view${g.ids.length > 100 ? ' first 100' : ''}</a>`;
       return [link, kindLabel[g.kind], g.ids.length, view];
     });
-    return '<b>Sources worth checking</b>' +
-      `<div class="hint">Anything that isn't a valid web link (listed first), sources shared by ${SAME_SOURCE_MIN}+ posts, any invite links (Discord or Telegram), and any that look like a profile or landing page instead of the original submission (judged from the link's shape; the script can't open the links, so check a few yourself). Deleted posts are left out.${SS.total > 30 ? ` Showing 30 of ${SS.total}.` : ''}</div>` +
-      (rows.length ? table(['Source', 'Looks like', 'Posts', 'Find posts'], rows) : '<div class="hint">Nothing stands out.</div>');
+    const th = (k, label) => `<th data-src-sort="${k}" title="Click to sort">${label}${key === k ? (dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
+    const tbl = `<table><tr>${th('source', 'Source')}${th('kind', 'Looks like')}${th('posts', 'Posts')}<th>Find posts</th></tr>` +
+      rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('') + '</table>';
+    return `<details class="ua-src"><summary>Sources worth checking (${SS.total})</summary>` +
+      `<div class="hint">Anything that isn't a valid web link (listed first), sources shared by ${SAME_SOURCE_MIN}+ posts, any invite links (Discord or Telegram), and any that look like a profile or landing page instead of the original submission (judged from the link's shape; the script can't open the links, so check a few yourself). Deleted posts are left out. Click a column header to sort.${SS.total > SOURCE_ROWS_MAX ? ` Showing ${SOURCE_ROWS_MAX} of ${SS.total}.` : ''}</div>` +
+      (rows.length ? tbl : '<div class="hint">Nothing stands out.</div>') + '</details>';
   }
 
   function secPosts() {
@@ -1175,6 +1193,13 @@
   }
 
   $('ua-report').addEventListener('click', (e) => {
+    const hs = e.target.closest && e.target.closest('th[data-src-sort]');
+    if (hs) {
+      const k = hs.dataset.srcSort;
+      srcSort = { key: k, dir: srcSort.key === k ? -srcSort.dir : (k === 'posts' ? -1 : 1) };
+      render();
+      return;
+    }
     const h = e.target.closest && e.target.closest('th[data-bl-sort]');
     if (!h) return;
     const key = h.dataset.blSort;
