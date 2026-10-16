@@ -2,6 +2,7 @@
 // @name         e6AI Source Cleaner
 // @namespace    e6ai-admin-tools
 // @version      1.1
+// @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: remove invalid sources from one user's posts, with preview, backup and restore.
 // @match        https://e6ai.net/*
