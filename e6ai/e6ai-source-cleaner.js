@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI Source Cleaner
 // @namespace    e6ai-admin-tools
-// @version      1.1
+// @version      1.3
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: remove invalid sources from one user's posts, with preview, backup and restore.
@@ -22,37 +22,38 @@
   let previewBackup = {};   // result of the last preview (not persisted)
 
   GM_addStyle(`
+    /* Same palette as the User Audit script (the site's "Bloodlust" theme) */
+    #sc-toggle, #sc-panel {
+      --sc-background: #000000; --sc-foreground: #222222; --sc-section: #333333; --sc-section-light: #4d4d4d;
+      --sc-text: #ffffff; --sc-muted: #cbb295; --sc-link: #ffee95; --sc-hover: #f68b00; --sc-accent: #e8c446;
+    }
     #sc-toggle { position: fixed; bottom: 16px; right: 16px; z-index: 99999; padding: 8px 12px;
       background: #284a81; color: #fff; border: 0; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    #sc-toggle:hover { background: #3a5f9f; }
     #sc-panel {
-      /* Fallbacks only - the real colours are copied from the page theme at runtime (see applyTheme) */
-      --sc-bg: #1c1c1c; --sc-section: #2e2e2e; --sc-border: #4a4a4a; --sc-text: #e0e0e0;
-      --sc-input: #111; --sc-accent: #8a1c1c; --sc-accent-hover: #b02a2a; --sc-log-text: #e8b4b4;
-      --sc-log-bg: #0c0c0c;
       position: fixed; z-index: 99999; width: 420px; height: 560px; min-width: 300px; min-height: 260px;
-      max-width: 100vw; max-height: 100vh; background: var(--sc-bg); color: var(--sc-text);
-      border: 1px solid var(--sc-border); border-radius: 8px; font-size: 13px;
-      box-shadow: 0 4px 20px rgba(0,0,0,.6); display: none; flex-direction: column;
-      overflow: hidden; resize: both; box-sizing: border-box; }
-    #sc-header { padding: 8px 12px; background: var(--sc-section); border-bottom: 1px solid var(--sc-border);
+      max-width: 100vw; max-height: 100vh; background: var(--sc-section); color: var(--sc-text);
+      border: 1px solid var(--sc-section-light); border-radius: 8px; font-size: 13px;
+      box-shadow: 0 4px 20px rgba(0,0,0,.7); display: none; flex-direction: column;
+      overflow: hidden; resize: both; box-sizing: border-box; color-scheme: dark; }
+    #sc-header { padding: 8px 12px; background: var(--sc-background); border-bottom: 1px solid var(--sc-section-light);
       cursor: move; user-select: none; touch-action: none; font-weight: bold; flex: 0 0 auto;
-      display: flex; justify-content: space-between; align-items: center; }
-    #sc-panel #sc-close { margin: 0; padding: 0 8px; font-size: 18px; line-height: 22px; background: transparent; border: 0; }
-    #sc-panel #sc-close:hover { background: var(--sc-accent-hover); }
+      display: flex; justify-content: space-between; align-items: center; border-radius: 8px 8px 0 0; }
+    #sc-panel #sc-close { margin: 0; padding: 0 8px; font-size: 18px; line-height: 22px; }
     #sc-body { padding: 12px; overflow: auto; flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
     #sc-panel label { display: block; margin: 8px 0 2px; font-weight: bold; }
     #sc-panel input[type=text], #sc-panel textarea { width: 100%; box-sizing: border-box; padding: 4px;
-      background: var(--sc-input); color: var(--sc-text); border: 1px solid var(--sc-border); border-radius: 3px; }
-    #sc-panel input[type=text]:focus, #sc-panel textarea:focus { outline: 1px solid var(--sc-accent-hover); }
-    #sc-panel button { margin: 8px 6px 0 0; padding: 5px 10px; cursor: pointer; background: var(--sc-accent);
-      color: var(--sc-btn-text, #fff); border: 1px solid var(--sc-border); border-radius: 4px; }
-    #sc-panel button:hover { background: var(--sc-accent-hover); }
-    #sc-status { margin-top: 10px; font-size: 12px; font-weight: bold; }
-    #sc-log { margin-top: 6px; flex: 1 1 120px; min-height: 120px; overflow: auto; background: var(--sc-log-bg);
-      color: var(--sc-log-text); border: 1px solid var(--sc-border); font-family: monospace; font-size: 11px;
+      background: var(--sc-foreground); color: var(--sc-text); border: 1px solid var(--sc-section-light); border-radius: 3px; }
+    #sc-panel input[type=text]:focus, #sc-panel textarea:focus { outline: 1px solid var(--sc-accent); }
+    #sc-panel button { margin: 8px 6px 0 0; padding: 5px 10px; cursor: pointer; background: var(--sc-foreground);
+      color: var(--sc-link); border: 1px solid var(--sc-section-light); border-radius: 4px; }
+    #sc-panel button:hover { background: var(--sc-background); color: var(--sc-hover); }
+    #sc-status { margin-top: 10px; font-size: 12px; font-weight: bold; color: var(--sc-accent); }
+    #sc-log { margin-top: 6px; flex: 1 1 120px; min-height: 120px; overflow: auto; background: var(--sc-background);
+      color: var(--sc-muted); border: 1px solid var(--sc-foreground); font-family: monospace; font-size: 11px;
       padding: 6px; white-space: pre-wrap; }
     #sc-panel .row { display: flex; gap: 12px; align-items: center; margin-top: 6px; }
-    #sc-panel .hint { font-size: 11px; opacity: .8; }
+    #sc-panel .hint { font-size: 11px; color: var(--sc-muted); }
   `);
 
   const panel = document.createElement('div');
@@ -108,6 +109,7 @@
   // ---------- movable / resizable window ----------
   let geom = {};
   try { geom = JSON.parse(GM_getValue('panelGeom', '{}')); } catch { /* ignore */ }
+  if (!(geom && geom.width > 100 && geom.height > 100 && typeof geom.left === 'number' && typeof geom.top === 'number')) geom = {};
   let placed = false;
 
   function clampPanel() {
@@ -118,6 +120,8 @@
     panel.style.top = top + 'px';
   }
   function saveGeom() {
+    // A closed (hidden) window measures 0 x 0 at 0,0, so saving then would wipe the remembered position.
+    if (panel.style.display !== 'flex' || !placed || !panel.offsetWidth || !panel.offsetHeight) return;
     GM_setValue('panelGeom', JSON.stringify({
       left: panel.offsetLeft, top: panel.offsetTop, width: panel.offsetWidth, height: panel.offsetHeight,
     }));
@@ -141,42 +145,10 @@
     new ResizeObserver(() => { clearTimeout(t); t = setTimeout(saveGeom, 300); }).observe(panel);
   }
 
-  // ---------- copy colours from the site's active theme (Bloodlust on e6AI) ----------
-  function sampleColor(selectors, prop) {
-    for (const sel of selectors) {
-      const el = document.querySelector(sel);
-      if (!el) continue;
-      const c = getComputedStyle(el)[prop];
-      const m = c && c.match(/rgba?\(([^)]+)\)/);
-      if (m) {
-        const parts = m[1].split(',').map((x) => parseFloat(x));
-        if (parts.length < 4 || parts[3] > 0.5) return c;
-      }
-    }
-    return null;
-  }
-  function applyTheme() {
-    const set = (name, val) => { if (val) panel.style.setProperty(name, val); };
-    const bg = sampleColor(['body'], 'backgroundColor');
-    const section = sampleColor(['.box-section', 'section.box-section', '#c-posts section', 'aside#sidebar', 'footer#page-footer'], 'backgroundColor');
-    const nav = sampleColor(['menu.main', '#nav', 'nav.navigation', 'header#top'], 'backgroundColor');
-    const text = sampleColor(['body'], 'color');
-    const link = sampleColor(['#nav a', 'menu.main a', 'a'], 'color');
-    set('--sc-bg', section || bg);
-    set('--sc-section', nav || section);
-    set('--sc-input', bg);
-    set('--sc-log-bg', bg);
-    set('--sc-text', text);
-    set('--sc-accent', nav || section);
-    set('--sc-accent-hover', link);
-    set('--sc-log-text', link);
-    set('--sc-border', link);
-  }
-
   toggle.onclick = () => {
     const open = panel.style.display !== 'flex';
     panel.style.display = open ? 'flex' : 'none';
-    if (open) { applyTheme(); placePanel(); clampPanel(); }
+    if (open) { placePanel(); clampPanel(); }
   };
 
   panel.querySelector('#sc-close').addEventListener('click', () => { panel.style.display = 'none'; });
