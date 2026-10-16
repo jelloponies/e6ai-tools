@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.10
+// @version      1.11
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -16,6 +16,7 @@
 
   const DELAY = 1000;      // ms between requests
   const MAX_RETRIES = 5;
+  const VOTER_ROWS = 10;   // voters shown per table; names are looked up for exactly these
   let stopFlag = false;
   let comments = [];       // loaded comments, used by the sample view
   let state = {};          // results of the current audit
@@ -687,12 +688,16 @@
     return section('Blacklist check', body, true);
   }
 
-  function receivedRows(R, key) {
+  function topVoters(R, key) {
     return Object.entries(R.byVoter).filter(([, v]) => v[key] > 0)
-      .sort((a, b) => b[1][key] - a[1][key] || (b[1].up + b[1].down) - (a[1].up + a[1].down)).slice(0, 10)
+      .sort((a, b) => b[1][key] - a[1][key] || (b[1].up + b[1].down) - (a[1].up + a[1].down)).slice(0, VOTER_ROWS);
+  }
+
+  function receivedRows(R, key) {
+    return topVoters(R, key)
       .map(([id, v]) => {
         const u = userInfo.get(String(id)), t = u && Date.parse(u.created_at);
-        const joined = t ? (Date.now() - t <= 30 * 864e5 ? `<span class="ua-neg">${esc(day(t))} (new)</span>` : esc(day(t))) : '?';
+        const joined = t ? (Date.now() - t <= 30 * 864e5 ? `<span class="ua-neg">${esc(day(t))} (new)</span>` : esc(day(t))) : (lookupFailed.has(String(id)) ? 'lookup failed' : '?');
         const link = R.kind === 'comments' ? (x) => commentLink({ id: x }) : postLink;
         return [userLink(id, u && u.name), joined, drill(upN(v.up), v.upItems, link), drill(downN(v.down), v.downItems, link),
           num(v.up - v.down, sgnText(v.up - v.down)), pct(v[key], R[key]) + '%'];
@@ -796,6 +801,7 @@
     comments = [];
     state = {};
     userInfo = new Map();
+    lookupFailed.clear();
     renderComments();
     const from = $('ua-from').value ? new Date($('ua-from').value + 'T00:00:00').getTime() : null;
     const to = $('ua-to').value ? new Date($('ua-to').value + 'T23:59:59.999').getTime() : null;
@@ -967,13 +973,36 @@
     render();
     if (stopFlag) return;
 
-    // names and account ages for the most active voters
-    const top = (R, key, n) => (R ? Object.entries(R.byVoter).sort((a, b) => b[1][key] - a[1][key]).filter((x) => x[1][key] > 0).slice(0, n).map((x) => x[0]) : []);
+    // names and account ages for exactly the voters shown in the tables
     const P = state.recvPosts && state.recvPosts.A, C = state.recvComments && state.recvComments.A;
-    const ids = [...new Set([...top(P, 'up', 8), ...top(P, 'down', 8), ...top(C, 'up', 5), ...top(C, 'down', 5)])];
-    for (let i = 0; i < ids.length && !stopFlag; i++) {
-      setStatus(`Looking up voters: ${i + 1}/${ids.length}`);
-      try { userInfo.set(String(ids[i]), await getJSON(`/users/${ids[i]}.json`)); } catch { userInfo.set(String(ids[i]), null); }
+    const ids = [...new Set([P && 'up', P && 'down'].filter(Boolean).flatMap((k) => topVoters(P, k).map((x) => x[0]))
+      .concat([C && 'up', C && 'down'].filter(Boolean).flatMap((k) => topVoters(C, k).map((x) => x[0]))))]
+      .filter((id) => !userInfo.has(String(id)));
+    await lookupUsers(ids);
+    render();
+  }
+
+  const lookupFailed = new Set();   // voter ids whose profile could not be loaded
+
+  // Tries one batched request first, then falls back to one request per user for anything still missing.
+  async function lookupUsers(ids) {
+    const missing = new Set(ids.map(String));
+    if (!missing.size) return;
+    setStatus(`Looking up ${missing.size} voters…`);
+    try {
+      for (let i = 0; i < ids.length && !stopFlag; i += 100) {
+        const chunk = ids.slice(i, i + 100);
+        const list = asList(await getJSON(`/users.json?search[id]=${chunk.join(',')}&limit=100`));
+        for (const u of list) if (missing.has(String(u.id))) { userInfo.set(String(u.id), u); missing.delete(String(u.id)); }
+        await sleep(DELAY);
+      }
+    } catch { /* fall back to one request per user below */ }
+    let n = 0;
+    for (const id of missing) {
+      if (stopFlag) break;
+      setStatus(`Looking up voters: ${++n}/${missing.size}`);
+      try { userInfo.set(id, await getJSON(`/users/${id}.json`)); lookupFailed.delete(id); }
+      catch (e) { lookupFailed.add(id); log(`Could not look up user #${id}: ${e.message}`); }
       await sleep(DELAY);
     }
     render();
