@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.13
+// @version      1.17
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -127,7 +127,7 @@
   // ---- source checks ----
   // Tweak these to taste: how many posts must share one identical source before it is listed/flagged,
   // and how many posts with profile-looking sources trigger the flag.
-  const SAME_SOURCE_MIN = 5, PROFILE_SOURCE_FLAG = 3, INVALID_SOURCE_FLAG = 1;
+  const SAME_SOURCE_MIN = 5, PROFILE_SOURCE_FLAG = 1, INVALID_SOURCE_FLAG = 1, CHAT_SOURCE_FLAG = 1;   // both 1 = always warn, however few posts are affected
 
   function parseSource(src) {
     if (/\s/.test(String(src).trim())) return null;   // a link never contains spaces (also catches two links in one field)
@@ -150,12 +150,15 @@
   }
 
   // Guesses from the link's shape what it points at: 'invalid' (not a web link at all), 'submission' (a specific post/artwork page),
-  // 'profile' (a profile, channel, gallery or other landing page), 'home' (just the site's front page) or 'unknown'.
+  // 'profile' (a profile, channel, gallery or other landing page), 'invite' (a Discord or Telegram invite/chat link), 'home' (just the site's front page) or 'unknown'.
   function classifySource(src) {
     const p = parseSource(src);
     if (!p) return 'invalid';   // not a web link at all (plain words, a version number, two links in one line, ...)
     const { host, segs, q } = p, n = segs.length, s0 = (segs[0] || '').toLowerCase();
     const on = (...d) => d.some((x) => host === x || host.endsWith('.' + x));
+    // Discord and Telegram: invites, server/channel links and t.me links all count as 'invite'
+    if (on('discord.gg', 'dsc.gg', 'discord.me', 'discord.link', 't.me', 'telegram.me', 'telegram.dog')) return n ? 'invite' : 'home';
+    if (['discord.com', 'discordapp.com', 'ptb.discord.com', 'canary.discord.com'].includes(host) && ['invite', 'channels', 'users', 'servers', 'events', 'discovery', 'template', 'oauth2'].includes(s0)) return 'invite';
     if (!n) return p.search ? 'unknown' : 'home';
 
     if (on('x.com', 'twitter.com')) {
@@ -199,7 +202,6 @@
     }
     if (on('tumblr.com')) return segs.includes('post') ? 'submission' : 'unknown';
     if (on('patreon.com')) return s0 === 'posts' ? 'submission' : (n <= 2 ? 'profile' : 'unknown');
-    if (on('discord.gg') || (on('discord.com') && s0 === 'invite')) return 'profile';
     if (on('frosting.ai')) {
       if (s0 === 'profile') return segs[2] === 'post' ? 'submission' : 'profile';
       return s0 === 'user' ? 'profile' : 'unknown';
@@ -229,14 +231,15 @@
     }
     const all = [...groups.values()].sort((a, b) => b.ids.length - a.ids.length);
     const landing = (g) => g.kind === 'profile' || g.kind === 'home';
-    const rows = all.filter((g) => g.ids.length >= SAME_SOURCE_MIN || landing(g) || g.kind === 'invalid')
+    const rows = all.filter((g) => g.ids.length >= SAME_SOURCE_MIN || landing(g) || g.kind === 'invalid' || g.kind === 'invite')
       .sort((a, b) => (b.kind === 'invalid') - (a.kind === 'invalid') || b.ids.length - a.ids.length);   // non-links first
-    const landingPosts = new Set(), invalidPosts = new Set();
+    const landingPosts = new Set(), invalidPosts = new Set(), chatPosts = new Set();
     for (const g of all) {
       if (landing(g)) g.ids.forEach((id) => landingPosts.add(id));
       if (g.kind === 'invalid') g.ids.forEach((id) => invalidPosts.add(id));
+      if (g.kind === 'invite') g.ids.forEach((id) => chatPosts.add(id));
     }
-    return { rows, total: rows.length, landingPosts: landingPosts.size, invalidPosts: invalidPosts.size,
+    return { rows, total: rows.length, landingPosts: landingPosts.size, invalidPosts: invalidPosts.size, chatPosts: chatPosts.size,
       invalidTop: all.find((g) => g.kind === 'invalid') || null,
       sameTop: all[0] && all[0].ids.length >= SAME_SOURCE_MIN ? all[0] : null };
   }
@@ -274,7 +277,7 @@
 
   function commentStats(list) {
     const st = { total: list.length, hidden: 0, negative: 0, scoreSum: 0, withLinks: 0, repeated: [], byPost: [] };
-    const bodies = {}, posts = {};
+    const bodies = {}, bodyItems = {}, posts = {};
     for (const c of list) {
       if (c.is_hidden) st.hidden++;
       const sc = c.score ?? 0;
@@ -282,11 +285,11 @@
       st.scoreSum += sc;
       if (/https?:\/\//i.test(c.body || '')) st.withLinks++;
       const b = normBody(c.body);
-      if (b) bodies[b] = (bodies[b] || 0) + 1;
+      if (b) { bodies[b] = (bodies[b] || 0) + 1; (bodyItems[b] = bodyItems[b] || []).push({ id: c.id, post_id: c.post_id }); }
       posts[c.post_id] = (posts[c.post_id] || 0) + 1;
     }
     st.repeated = Object.entries(bodies).filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([body, n]) => ({ body, n }));
+      .map(([body, n]) => ({ body, n, items: bodyItems[body] }));
     st.byPost = Object.entries(posts).filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).slice(0, 5)
       .map(([id, n]) => ({ id, n }));
     return st;
@@ -377,6 +380,10 @@
     #ua-panel details.ua-x { display: inline-block; margin: 0; }
     #ua-panel details.ua-x > summary { font-weight: normal; }
     #ua-panel .ua-links { max-width: 330px; max-height: 120px; overflow: auto; line-height: 1.5; }
+    /* inside tables the list opens in its own full-width row (see the toggle handler), so no column resizes */
+    #ua-panel tr details.ua-x > .ua-links { display: none; }
+    #ua-panel tr.ua-xrow td { padding: 3px 6px 6px 18px; background: var(--ua-foreground); }
+    #ua-panel tr.ua-xrow .ua-links { max-width: none; max-height: 140px; }
     #ua-head { position: sticky; top: 0; z-index: 2; margin: -12px -12px 6px; padding: 8px 12px; background: var(--ua-background);
       border-bottom: 1px solid var(--ua-section-light); cursor: move; user-select: none; touch-action: none; border-radius: 8px 8px 0 0; }
     #ua-head #ua-close { float: right; margin: 0; padding: 0 7px; cursor: pointer; }
@@ -384,7 +391,8 @@
     #ua-log { margin-top: 4px; max-height: 90px; overflow: auto; background: var(--ua-background); color: var(--ua-muted);
       font-family: monospace; font-size: 11px; padding: 4px; white-space: pre-wrap; border: 1px solid var(--ua-foreground); }
     .ua-flags { background: var(--ua-foreground); border: 1px solid var(--ua-accent); border-radius: 6px; padding: 6px 10px; margin-top: 10px; }
-    .ua-flags ul { margin: 4px 0 0 18px; padding: 0; }
+    #ua-panel .ua-flags ul { list-style: disc outside; margin: 4px 0 0; padding: 0 0 0 20px; }
+    #ua-panel .ua-flags li { display: list-item; list-style: disc outside; margin: 3px 0; }
     .ua-c { border-bottom: 1px solid var(--ua-foreground); padding: 5px 0; color: var(--ua-text); font-size: 13px; }
     .ua-c .meta { font-size: 11px; color: var(--ua-muted); }
     #ua-panel .ua-pos { color: var(--ua-pos); font-weight: bold; }
@@ -532,6 +540,26 @@
     FIELDS.forEach((id) => { if (typeof s[id] === 'string') $(id).value = s[id]; });
     BOXES.forEach((id) => { if (typeof s[id] === 'boolean') $(id).checked = s[id]; });
   })();
+  // Expanding a count inside a table opens its list in a new full-width row under it, so the columns stay put.
+  panel.addEventListener('toggle', (e) => {
+    const d = e.target;
+    if (!d.matches || !d.matches('details.ua-x')) return;
+    const tr = d.closest('tr');
+    if (!tr) return;
+    if (d.open) {
+      const box = d.querySelector('.ua-links');
+      if (!box || d._xrow) return;
+      const row = document.createElement('tr'), td = document.createElement('td');
+      row.className = 'ua-xrow';
+      td.colSpan = tr.children.length;
+      td.innerHTML = box.outerHTML;
+      row.appendChild(td);
+      let after = tr;
+      while (after.nextElementSibling && after.nextElementSibling.classList.contains('ua-xrow')) after = after.nextElementSibling;
+      after.after(row);
+      d._xrow = row;
+    } else if (d._xrow) { d._xrow.remove(); d._xrow = null; }
+  }, true);
   panel.addEventListener('input', saveSettings);
   panel.addEventListener('change', saveSettings);
 
@@ -643,10 +671,11 @@
       if (P.deleted / P.total >= 0.25) f.push(`${pct(P.deleted, P.total)}% of their uploads are deleted.`);
     }
     if (P && P.sources) {
-      const SS = P.sources, kindText = { profile: ' (looks like a profile or landing page)', home: ' (just a site front page)' };
-      if (SS.invalidPosts >= INVALID_SOURCE_FLAG) f.push(`${SS.invalidPosts} of their posts have a source that isn't a valid web link (most common: "${SS.invalidTop.url}", ${SS.invalidTop.ids.length} post${SS.invalidTop.ids.length === 1 ? '' : 's'}). See "Sources worth checking" under Uploads.`);
+      const SS = P.sources, kindText = { profile: ' (looks like a profile or landing page)', home: ' (just a site front page)', invite: ' (an invite link)' };
+      if (SS.invalidPosts >= INVALID_SOURCE_FLAG) f.push(`${SS.invalidPosts} of their posts ${SS.invalidPosts === 1 ? 'has' : 'have'} a source that isn't a valid web link (most common: "${SS.invalidTop.url}", ${SS.invalidTop.ids.length} post${SS.invalidTop.ids.length === 1 ? '' : 's'}). See "Sources worth checking" under Uploads.`);
       if (SS.sameTop) f.push(`${SS.sameTop.ids.length} of their posts list the identical source ${SS.sameTop.url}${kindText[SS.sameTop.kind] || ''}. See "Sources worth checking" under Uploads.`);
-      if (SS.landingPosts >= PROFILE_SOURCE_FLAG) f.push(`${SS.landingPosts} of their posts have a source that looks like a profile or landing page instead of the original submission. See "Sources worth checking" under Uploads.`);
+      if (SS.landingPosts >= PROFILE_SOURCE_FLAG) f.push(`${SS.landingPosts} of their posts ${SS.landingPosts === 1 ? 'has' : 'have'} a source that looks like a profile or landing page.`);
+      if (SS.chatPosts >= CHAT_SOURCE_FLAG) f.push(`${SS.chatPosts} of their posts ${SS.chatPosts === 1 ? 'has' : 'have'} a source that is an invite link. See "Sources worth checking" under Uploads.`);
     }
     if (P && P.maxPerHour >= 50) f.push(`Uploaded up to ${P.maxPerHour} posts within a single hour.`);
     if (C) {
@@ -722,7 +751,7 @@
   }
 
   function sourcesTable(SS) {
-    const kindLabel = { invalid: 'not a valid link', profile: 'profile or landing page', home: 'site front page', submission: 'submission page', unknown: 'unknown' };
+    const kindLabel = { invalid: 'not a valid link', profile: 'profile or landing page', home: 'site front page', invite: 'invite link', submission: 'submission page', unknown: 'unknown' };
     const rows = SS.rows.slice(0, 30).map((g) => {
       const link = /^https?:\/\//i.test(g.url)
         ? `<a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">${esc(g.url.length > 70 ? g.url.slice(0, 67) + '…' : g.url)}</a>`
@@ -731,7 +760,7 @@
       return [link, kindLabel[g.kind], g.ids.length, view];
     });
     return '<b>Sources worth checking</b>' +
-      `<div class="hint">Anything that isn't a valid web link (listed first), sources shared by ${SAME_SOURCE_MIN}+ posts, and any that look like a profile or landing page instead of the original submission (judged from the link's shape; the script can't open the links, so check a few yourself). Deleted posts are left out.${SS.total > 30 ? ` Showing 30 of ${SS.total}.` : ''}</div>` +
+      `<div class="hint">Anything that isn't a valid web link (listed first), sources shared by ${SAME_SOURCE_MIN}+ posts, any invite links (Discord or Telegram), and any that look like a profile or landing page instead of the original submission (judged from the link's shape; the script can't open the links, so check a few yourself). Deleted posts are left out.${SS.total > 30 ? ` Showing 30 of ${SS.total}.` : ''}</div>` +
       (rows.length ? table(['Source', 'Looks like', 'Posts', 'Find posts'], rows) : '<div class="hint">Nothing stands out.</div>');
   }
 
@@ -763,7 +792,7 @@
       ['Average score', fnum(S.scoreSum / S.total)],
       ['Hidden', S.hidden],
       ['Containing links', S.withLinks],
-    ]) + (S.repeated.length ? '<b>Repeated comments</b>' + table(['Text', 'Times'], S.repeated.map((r) => [esc(r.body.slice(0, 120)), r.n])) : '') +
+    ]) + (S.repeated.length ? '<b>Repeated comments</b>' + table(['Text', 'Times'], S.repeated.map((r) => [esc(r.body.slice(0, 120)), drill(esc(r.n), r.items, commentLink, 200)])) : '') +
       (S.byPost.length ? '<b>Posts they comment on most</b>' + table(['Post', 'Comments'], S.byPost.map((r) => [postLink(r.id), r.n])) : '');
     return section('Comments', body);
   }
