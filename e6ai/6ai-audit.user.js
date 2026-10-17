@@ -9,6 +9,7 @@
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // ==/UserScript==
 
 (function () {
@@ -434,6 +435,7 @@
       <button id="ua-stop">Stop</button>
     </div>
     <div id="ua-status"></div>
+    <div id="ua-stamp" class="hint" style="display:none"></div>
     <div id="ua-log"></div>
     <div id="ua-report"></div>
     <details id="ua-sample" style="display:none">
@@ -985,6 +987,7 @@
   async function runAudit() {
     stopFlag = false;
     $('ua-log').textContent = '';
+    $('ua-stamp').style.display = 'none';
     comments = [];
     state = {};
     userInfo = new Map();
@@ -1047,6 +1050,10 @@
     } finally {
       setStatus(stopFlag ? 'Stopped.' : 'Done.');
       render();
+      if (!stopFlag && state.user) {
+        const ts = saveCache({ from, to, maxC, maxV });
+        showStamp(ts, false);
+      }
     }
   }
 
@@ -1209,6 +1216,81 @@
     blSort = { key, dir: blSort.key === key ? -blSort.dir : (key === 'entry' ? 1 : -1) };
     render();
   });
+
+
+  // ---------- saved audits (per user, kept in the userscript manager's storage) ----------
+  const CACHE_MAX_USERS = 20;              // keep at most this many users
+  const CACHE_MAX_AGE = 30 * 864e5;        // forget audits older than 30 days
+  const cacheKey = (id) => 'ua_cache_' + id;
+  const toJSON = (v) => JSON.stringify(v, (k, x) => x instanceof Map ? { __t: 'Map', v: [...x] } : x instanceof Set ? { __t: 'Set', v: [...x] } : x);
+  const fromJSON = (t) => JSON.parse(t, (k, x) => x && x.__t === 'Map' ? new Map(x.v) : x && x.__t === 'Set' ? new Set(x.v) : x);
+  const readIndex = () => { try { return JSON.parse(GM_getValue('ua_cache_index', '{}')) || {}; } catch { return {}; } };
+
+  function saveCache(opts) {
+    const ts = Date.now();
+    try {
+      GM_setValue(cacheKey(profileId), toJSON({ ts, opts, state, comments, userInfo, lookupFailed }));
+      const idx = readIndex();
+      idx[profileId] = ts;
+      const ids = Object.keys(idx).sort((a, b) => idx[b] - idx[a]);
+      ids.forEach((id, i) => {
+        if (i >= CACHE_MAX_USERS || ts - idx[id] > CACHE_MAX_AGE) { GM_deleteValue(cacheKey(id)); delete idx[id]; }
+      });
+      GM_setValue('ua_cache_index', JSON.stringify(idx));
+    } catch (e) { log('Could not save this audit: ' + e.message); }
+    return ts;
+  }
+
+  function loadCache() {
+    try {
+      const raw = GM_getValue(cacheKey(profileId), null);
+      if (!raw) return null;
+      const c = fromJSON(raw);
+      if (!c || !c.state || !c.state.user || Date.now() - c.ts > CACHE_MAX_AGE) return null;
+      return c;
+    } catch { return null; }
+  }
+
+  function clearCache() {
+    try {
+      GM_deleteValue(cacheKey(profileId));
+      const idx = readIndex();
+      delete idx[profileId];
+      GM_setValue('ua_cache_index', JSON.stringify(idx));
+    } catch { /* ignore */ }
+  }
+
+  function showStamp(ts, cached) {
+    const d = new Date(ts), z = (n) => String(n).padStart(2, '0');
+    const when = `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`;
+    const mins = Math.max(0, Math.round((Date.now() - ts) / 6e4));
+    const ago = mins < 2 ? 'just now' : mins < 90 ? `${mins} min ago` : mins < 2880 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} days ago`;
+    const box = $('ua-stamp');
+    box.innerHTML = cached
+      ? `Saved audit from ${when} (${ago}). Press Run audit for fresh data. <a href="#" id="ua-clear-saved">Clear saved</a>`
+      : `Audited ${when}. <a href="#" id="ua-clear-saved">Clear saved</a>`;
+    box.style.display = '';
+  }
+
+  $('ua-stamp').addEventListener('click', (e) => {
+    if (!(e.target.closest && e.target.closest('#ua-clear-saved'))) return;
+    e.preventDefault();
+    clearCache();
+    $('ua-stamp').style.display = 'none';
+  });
+
+  (function restoreSaved() {
+    const c = loadCache();
+    if (!c) return;
+    state = c.state;
+    comments = c.comments || [];
+    userInfo = c.userInfo instanceof Map ? c.userInfo : new Map();
+    lookupFailed.clear();
+    if (c.lookupFailed instanceof Set) c.lookupFailed.forEach((x) => lookupFailed.add(x));
+    renderComments();
+    render();
+    showStamp(c.ts, true);
+  })();
 
   $('ua-run').onclick = runAudit;
   $('ua-stop').onclick = () => { stopFlag = true; log('Stopping...'); };
