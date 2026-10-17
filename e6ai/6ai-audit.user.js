@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.25
+// @version      1.27
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -15,8 +15,12 @@
 (function () {
   'use strict';
 
-  const DELAY = 1000;      // ms between requests
+  const DELAY_FAST = 600;  // ms between requests at the start of each run
+  const DELAY_SLOW = 1000; // ms between requests after the server has sent a 429
+  let DELAY = DELAY_FAST;  // current delay; dropped to DELAY_SLOW on a 429 until the next run starts
   const MAX_RETRIES = 5;
+  const PARALLEL = true;           // two request lanes at once (uploads/comments/received votes, and post/comment votes); false = one after the other
+  const RECEIVED_SCAN_CAP = 1000;  // most of their own posts, and of their own comments, checked for votes they received (was 3000)
   const VOTER_ROWS = 10;   // voters shown per table; names are looked up for exactly these
   let stopFlag = false;
   let comments = [];       // loaded comments, used by the sample view
@@ -398,6 +402,9 @@
       border-bottom: 1px solid var(--ua-section-light); cursor: move; user-select: none; touch-action: none; border-radius: 8px 8px 0 0; }
     #ua-head #ua-close { float: right; margin: 0; padding: 0 7px; cursor: pointer; }
     #ua-status { margin-top: 8px; font-weight: bold; font-size: 12px; color: var(--ua-accent); }
+    #ua-bar { position: relative; display: none; margin-top: 6px; height: 14px; background: var(--ua-background); border: 1px solid var(--ua-foreground); border-radius: 7px; overflow: hidden; }
+    #ua-bar-fill { height: 100%; width: 0; background: var(--ua-accent); transition: width .25s ease; }
+    #ua-bar-text { position: absolute; inset: 0; text-align: center; font-size: 10px; line-height: 14px; font-weight: bold; color: #fff; text-shadow: 0 0 2px #000, 0 0 2px #000; }
     #ua-log { margin-top: 4px; max-height: 90px; overflow: auto; background: var(--ua-background); color: var(--ua-muted);
       font-family: monospace; font-size: 11px; padding: 4px; white-space: pre-wrap; border: 1px solid var(--ua-foreground); }
     .ua-flags { background: var(--ua-foreground); border: 1px solid var(--ua-accent); border-radius: 6px; padding: 6px 10px; margin-top: 10px; }
@@ -435,6 +442,7 @@
       <button id="ua-stop">Stop</button>
     </div>
     <div id="ua-status"></div>
+    <div id="ua-bar"><div id="ua-bar-fill"></div><span id="ua-bar-text"></span></div>
     <div id="ua-stamp" class="hint" style="display:none"></div>
     <div id="ua-log"></div>
     <div id="ua-report"></div>
@@ -518,6 +526,50 @@
   const log = (m) => { const l = $('ua-log'); l.textContent += m + '\n'; l.scrollTop = l.scrollHeight; };
   const setStatus = (m) => { $('ua-status').textContent = m; };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ---------- progress bar ----------
+  // An estimate. Each lane's tasks are weighted and the bar follows the slower lane, because the run ends when both are done.
+  // Where a total is known (their upload / comment counts, the lists of voted items, the date range) the fill is exact;
+  // otherwise a soft curve is used that creeps up but never reaches the end before the work does.
+  const PROGRESS_TASKS = {
+    posts: ['A', 3], comments: ['A', 3], recvPosts: ['A', 3], recvComments: ['A', 2], voters: ['A', 1],
+    votes: ['B', 4], votedPosts: ['B', 2], cvotes: ['B', 2], votedComments: ['B', 1],
+  };
+  let progress = { tasks: {}, shown: 0, active: false, pct: -1, label: '' };
+  const soft = (n, k) => n / (n + k);
+  function progressOverall() {
+    if (!progress.active) return 0.01;
+    const sum = { A: [0, 0], B: [0, 0] };
+    for (const t of Object.values(progress.tasks)) { sum[t.lane][0] += t.w * t.f; sum[t.lane][1] += t.w; }
+    const frac = (v) => (v[1] ? v[0] / v[1] : 1);
+    return 0.03 + 0.97 * Math.min(frac(sum.A), frac(sum.B));
+  }
+  function progressRender(label = '') {
+    progress.shown = Math.max(progress.shown, progressOverall());
+    const pct = Math.min(100, Math.floor(progress.shown * 100));
+    if (pct === progress.pct && label === progress.label) return;
+    progress.pct = pct; progress.label = label;
+    $('ua-bar').style.display = 'block';
+    $('ua-bar-fill').style.width = pct + '%';
+    $('ua-bar-text').textContent = pct + '%' + label;
+  }
+  function progressReset() { progress = { tasks: {}, shown: 0, active: false, pct: -1, label: '' }; progressRender(); }
+  function progressStart(names) {
+    for (const n of names) progress.tasks[n] = { lane: PROGRESS_TASKS[n][0], w: PROGRESS_TASKS[n][1], f: 0 };
+    progress.active = true;
+    progressRender();
+  }
+  function progressSet(name, f) {
+    const t = progress.tasks[name];
+    if (!t) return;
+    f = Math.max(0, Math.min(1, f));
+    if (f > t.f) { t.f = f; progressRender(); }
+  }
+  function progressLaneDone(lane) {
+    if (stopFlag) return;
+    for (const t of Object.values(progress.tasks)) if (t.lane === lane) t.f = 1;
+    progressRender();
+  }
   const day = (t) => (Number.isNaN(t) ? '?' : new Date(t).toLocaleDateString('sv-SE'));
   const postLink = (id) => `<a href="/posts/${id}" target="_blank">#${id}</a>`;
   // Number colouring: positive green, zero yellow, negative red.
@@ -585,6 +637,30 @@
   $('ua-all').onclick = () => setRange(0);
 
   // ---------- network with retry ----------
+  // Spaces request START times DELAY apart per lane, so time spent waiting on the server counts toward the delay.
+  // Two lanes run at once, so the combined rate is up to twice 1/DELAY. After a 429 all lanes share one slot
+  // (combined rate = DELAY_SLOW) and every lane waits out the pause.
+  let slots = {};
+  let pauseUntil = 0;
+  let runStats = { start: Date.now(), requests: 0, retries: 0, rateLimited: 0, slowedAfter: null };   // numbers for the end-of-run summary
+  async function throttle(lane = 'A') {
+    const key = DELAY === DELAY_SLOW ? 'all' : lane;
+    const now = Date.now(), at = Math.max(now, slots[key] || 0, pauseUntil);
+    slots[key] = at + DELAY;
+    runStats.requests++;
+    if (at > now) await sleep(at - now);
+  }
+
+  function logRunSummary() {
+    const sec = (Date.now() - runStats.start) / 1000;
+    const took = sec >= 60 ? `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s` : `${sec.toFixed(1)}s`;
+    const rl = runStats.rateLimited
+      ? `rate limited ${runStats.rateLimited}x (429)` + (runStats.slowedAfter !== null ? `, slowed to ${DELAY_SLOW}ms after ${Math.round(runStats.slowedAfter / 1000)}s` : '')
+      : 'no rate limiting';
+    const retries = runStats.retries ? ` | ${runStats.retries} ${runStats.retries === 1 ? 'retry' : 'retries'}` : '';
+    log(`${stopFlag ? 'Stopped after' : 'Finished in'} ${took} | ${runStats.requests} requests (${(runStats.requests / Math.max(sec, 0.1)).toFixed(1)}/s) | ${rl}${retries}`);
+  }
+
   function checkOk(r) {
     if (r.ok) return r;
     const e = new Error(`${r.status} ${r.statusText}`);
@@ -599,9 +675,13 @@
     for (let attempt = 1; ; attempt++) {
       try { return await fn(); }
       catch (e) {
+        if (e.status === 429) runStats.rateLimited++;
         const retryable = e.status === undefined || e.status === 429 || e.status >= 500;
         if (!retryable || attempt >= MAX_RETRIES || stopFlag) throw e;
+        if (e.status === 429 && DELAY !== DELAY_SLOW) { DELAY = DELAY_SLOW; if (runStats.slowedAfter === null) runStats.slowedAfter = Date.now() - runStats.start; log(`  ... rate limited (429), slowing to ${DELAY_SLOW}ms for the rest of this run`); }
         const ms = e.retryAfter || wait;
+        if (e.status === 429) pauseUntil = Math.max(pauseUntil, Date.now() + ms);
+        runStats.retries++;
         log(`  ... ${label}: ${e.message}, retrying in ${Math.round(ms / 1000)}s (attempt ${attempt}/${MAX_RETRIES})`);
         await sleep(ms);
         wait = Math.min(wait * 2, 60000);
@@ -609,13 +689,15 @@
     }
   }
 
-  const getJSON = (url) => withRetry(async () => {
+  const getJSON = (url, lane) => withRetry(async () => {
+    await throttle(lane);
     const r = checkOk(await fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } }));
     return r.json();
   }, url.split('?')[0]);
 
   // Staff-only page: https://e6ai.net/staff/users/<id>/edit_blacklist. The blacklist is in the form's textarea.
   async function fetchStaffBlacklist(id) {
+    await throttle();
     const r = checkOk(await fetch(`/staff/users/${id}/edit_blacklist`, { credentials: 'same-origin', headers: { Accept: 'text/html' } }));
     const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
     const ta = doc.querySelector('textarea[name="user[blacklisted_tags]"], textarea#user_blacklisted_tags')
@@ -627,11 +709,11 @@
   const asList = (d) => (Array.isArray(d) ? d : d.posts || d.comments || d.post_votes || d.comment_votes || d.votes || []);
 
   // Walks a newest-first listing page by page, honouring the from/to window (ms timestamps or null).
-  async function* paged(url, from, to) {
+  async function* paged(url, from, to, capUnknown, lane) {
     let page = '1';
     const lim = Number((/[?&]limit=(\d+)/.exec(url) || [])[1]) || 0;
     while (!stopFlag) {
-      const list = asList(await getJSON(`${url}${url.includes('?') ? '&' : '?'}page=${page}`));
+      const list = asList(await getJSON(`${url}${url.includes('?') ? '&' : '?'}page=${page}`, lane));
       if (!list.length) return;
       for (const item of list) {
         const t = Date.parse(item.created_at);
@@ -639,34 +721,36 @@
         if (to && t > to) continue;
         yield item;
       }
-      if (lim && list.length < lim) return;   // short page = last page, no need to request an empty one
+      // short page = last page, no need to request an empty one
+      // (capUnknown: the server may cap the page size below the requested limit, so only a page under 100 counts as short)
+      if (lim && list.length < (capUnknown ? Math.min(lim, 100) : lim)) return;
       page = 'b' + list[list.length - 1].id;
-      await sleep(DELAY);
     }
   }
 
-  async function fetchByIds(ids, urlFor, keyOf, label) {
+  async function fetchByIds(ids, urlFor, keyOf, label, lane, task) {
     const map = new Map();
     const BATCH = 100;
     let individual = false;
     for (let i = 0; i < ids.length && !stopFlag; i += BATCH) {
       const chunk = ids.slice(i, i + BATCH);
       if (!individual) {
-        const got = asList(await getJSON(urlFor(chunk)));
+        const got = asList(await getJSON(urlFor(chunk), lane));
         got.forEach((x) => map.set(keyOf(x), x));
         if (i === 0 && !got.length) {
           log(`Batch lookup of ${label} returned nothing; falling back to one request each (capped at 300).`);
           individual = true;
-        } else { setStatus(`Loading ${label}: ${Math.min(i + BATCH, ids.length)}/${ids.length}`); await sleep(DELAY); continue; }
+        } else { setStatus(`Loading ${label}: ${Math.min(i + BATCH, ids.length)}/${ids.length}`); progressSet(task, Math.min(i + BATCH, ids.length) / ids.length * 0.98); continue; }
       }
       for (const id of chunk.slice(0, Math.max(0, 300 - map.size))) {
         if (stopFlag) break;
-        try { const x = await getJSON(urlFor([id])); asList(x).forEach((y) => map.set(keyOf(y), y)); } catch { /* skip */ }
+        try { const x = await getJSON(urlFor([id]), lane); asList(x).forEach((y) => map.set(keyOf(y), y)); } catch { /* skip */ }
         setStatus(`Loading ${label}: ${map.size}`);
-        await sleep(DELAY);
+        progressSet(task, map.size / Math.max(1, Math.min(300, ids.length)) * 0.98);
       }
       break;
     }
+    progressSet(task, 1);
     return map;
   }
 
@@ -986,6 +1070,11 @@
   // ---------- audit ----------
   async function runAudit() {
     stopFlag = false;
+    DELAY = DELAY_FAST;
+    slots = {};
+    pauseUntil = 0;
+    runStats = { start: Date.now(), requests: 0, retries: 0, rateLimited: 0, slowedAfter: null };
+    progressReset();
     $('ua-log').textContent = '';
     $('ua-stamp').style.display = 'none';
     comments = [];
@@ -1016,14 +1105,27 @@
       state.blacklist = { source: blSource, error: blError, entries: parseBlacklist(blText) };
       render();
 
+      const names = [];
+      if ($('ua-do-posts').checked) names.push('posts');
+      if ($('ua-do-comments').checked) names.push('comments');
+      if ($('ua-do-received').checked) names.push('recvPosts', 'recvComments', 'voters');
+      if ($('ua-do-votes').checked) names.push('votes', 'votedPosts', 'cvotes', 'votedComments');
+      progressStart(names);
+
+      // Lane A: uploads -> comments -> votes they received (which reuses the lists just loaded).
+      // Lane B: votes they cast on posts -> on comments. The lanes are independent, so they can overlap.
+      const laneA = async () => {
       if ($('ua-do-posts').checked && !stopFlag) {
         try {
           const list = [];
-          for await (const p of paged(`/posts.json?tags=${encodeURIComponent(`user:${user.name} status:any`)}&limit=320`, null, null)) {
+          const knownUploads = Number(user.post_upload_count) || 0;
+          for await (const p of paged(`/posts.json?tags=${encodeURIComponent(`user:${user.name} status:any`)}&limit=320`, null, null, false, 'A')) {
             list.push(p);
+            progressSet('posts', (knownUploads ? list.length / knownUploads : soft(list.length, 1500)) * 0.98);
             if (list.length % 100 === 0) setStatus(`Loading uploads: ${list.length}`);
             if (list.length >= 10000) { log('Stopped at 10000 uploads.'); break; }
           }
+          progressSet('posts', 1);
           state.posts = { stats: postStats(list, Date.now()) };
           state.uploadIds = list.map((p) => p.id);
           render();
@@ -1032,24 +1134,37 @@
 
       if ($('ua-do-comments').checked && !stopFlag) {
         try {
-          for await (const c of paged(`/comments.json?group_by=comment&search[creator_id]=${user.id}&limit=100`, from, to)) {
+          const knownC = (from || to) ? 0 : Math.min(maxC, Number(user.comment_count) || 0);
+          for await (const c of paged(`/comments.json?group_by=comment&search[creator_id]=${user.id}&limit=320`, from, to, true, 'A')) {
             comments.push(c);
+            progressSet('comments', (knownC ? comments.length / knownC : soft(comments.length, 400)) * 0.98);
             if (comments.length % 100 === 0) setStatus(`Loading comments: ${comments.length}`);
             if (comments.length >= maxC) break;
           }
+          progressSet('comments', 1);
           state.comments = { stats: commentStats(comments) };
           renderComments();
           render();
         } catch (e) { log('Comments failed: ' + e.message); }
       }
 
-      if ($('ua-do-votes').checked && !stopFlag) await auditVotes(user, from, to, maxV);
-      if ($('ua-do-received').checked && !stopFlag) await auditReceived(user, from, to, maxV);
+        if ($('ua-do-received').checked && !stopFlag) await auditReceived(user, from, to, maxV, 'A');
+      };
+      const laneB = async () => {
+        if ($('ua-do-votes').checked && !stopFlag) await auditVotes(user, from, to, maxV, 'B');
+      };
+      const safe = (f, lane) => f().catch((e) => log('Error: ' + e.message)).finally(() => progressLaneDone(lane));
+      if (PARALLEL) await Promise.all([safe(laneA, 'A'), safe(laneB, 'B')]);
+      else { await safe(laneA, 'A'); await safe(laneB, 'B'); }
     } catch (e) {
       log('Error: ' + e.message);
     } finally {
       setStatus(stopFlag ? 'Stopped.' : 'Done.');
       render();
+      logRunSummary();
+      if (!state.user) $('ua-bar').style.display = 'none';
+      else if (stopFlag) progressRender(' (stopped)');
+      else { progress.shown = 1; progressRender(); }
       if (!stopFlag && state.user) {
         const ts = saveCache({ from, to, maxC, maxV });
         showStamp(ts, false);
@@ -1057,13 +1172,17 @@
     }
   }
 
-  async function auditVotes(user, from, to, maxV) {
+  async function auditVotes(user, from, to, maxV, lane) {
     const votes = [];
+    let newest = null;
     try {
       setStatus('Loading post votes…');
-      for await (const v of paged(`/post_votes.json?search[user_id]=${user.id}&limit=320`, from, to)) {
+      for await (const v of paged(`/post_votes.json?search[user_id]=${user.id}&limit=320`, from, to, false, lane)) {
         if (v.user_id !== undefined && Number(v.user_id) !== Number(user.id)) throw new Error('The votes list did not filter by user, so it was not used.');
         votes.push(v);
+        if (newest === null) newest = Date.parse(v.created_at);
+        const byTime = from ? (newest - Date.parse(v.created_at)) / Math.max(1, newest - from) : soft(votes.length, 800);
+        progressSet('votes', Math.max(byTime || 0, votes.length / maxV) * 0.98);
         if (votes.length >= maxV) break;
       }
     } catch (e) {
@@ -1072,26 +1191,32 @@
       render();
       return;
     }
+    progressSet('votes', 1);
     const ids = [...new Set(votes.map((v) => v.post_id))];
     const postMap = await fetchByIds(ids,
       (chunk) => `/posts.json?tags=${encodeURIComponent(`id:${chunk.join(',')} status:any`)}&limit=100`,
-      (p) => p.id, 'voted posts');
+      (p) => p.id, 'voted posts', lane, 'votedPosts');
     state.votes = { A: analyzeVotes(votes, postMap, state.blacklist.entries) };
     render();
 
     if (stopFlag) return;
     const cv = [];
+    let newestC = null;
     try {
       setStatus('Loading comment votes…');
-      for await (const v of paged(`/comment_votes.json?search[user_id]=${user.id}&limit=320`, from, to)) {
+      for await (const v of paged(`/comment_votes.json?search[user_id]=${user.id}&limit=320`, from, to, false, lane)) {
         if (v.user_id !== undefined && Number(v.user_id) !== Number(user.id)) throw new Error('filter not honoured');
         cv.push(v);
+        if (newestC === null) newestC = Date.parse(v.created_at);
+        const byTimeC = from ? (newestC - Date.parse(v.created_at)) / Math.max(1, newestC - from) : soft(cv.length, 800);
+        progressSet('cvotes', Math.max(byTimeC || 0, cv.length / maxV) * 0.98);
         if (cv.length >= maxV) break;
       }
+      progressSet('cvotes', 1);
       const cids = [...new Set(cv.map((v) => v.comment_id))];
       const cmap = await fetchByIds(cids,
         (chunk) => `/comments.json?group_by=comment&search[id]=${chunk.join(',')}&limit=100`,
-        (c) => c.id, 'voted comments');
+        (c) => c.id, 'voted comments', lane, 'votedComments');
       const C = { up: 0, down: 0, missing: 0, byAuthor: {} };
       for (const v of cv) {
         const dir = v.score > 0 ? 'up' : v.score < 0 ? 'down' : null;
@@ -1115,22 +1240,25 @@
   // Votes other people cast on this user's posts and comments.
   // The vote lists only accept a creator filter together with a voter or item filter, so instead of
   // "votes on posts by X" we ask for votes on batches of X's own post/comment ids (newest first).
-  async function auditReceived(user, from, to, maxV) {
-    const SCAN_CAP = 3000, BATCH = 100;
+  async function auditReceived(user, from, to, maxV, lane) {
+    const SCAN_CAP = RECEIVED_SCAN_CAP, BATCH = 100;
     const fail = (e, what) => ({ error: [401, 403, 404].includes(e.status)
       ? `Your role can't view votes on their ${what} (${e.message}).` : `Votes on their ${what} failed: ${e.message}` });
 
     async function* uploadIds() {
       if (state.uploadIds) { for (const id of state.uploadIds) yield id; return; }
-      for await (const p of paged(`/posts.json?tags=${encodeURIComponent(`user:${user.name} status:any`)}&limit=320`, null, null)) yield p.id;
+      for await (const p of paged(`/posts.json?tags=${encodeURIComponent(`user:${user.name} status:any`)}&limit=320`, null, null, false, lane)) yield p.id;
     }
     async function* commentIds() {
       if (comments.length && !from && !to) { for (const c of comments) yield c.id; return; }
-      for await (const c of paged(`/comments.json?group_by=comment&search[creator_id]=${user.id}&limit=100`, null, null)) yield c.id;
+      for await (const c of paged(`/comments.json?group_by=comment&search[creator_id]=${user.id}&limit=320`, null, null, true, lane)) yield c.id;
     }
 
-    async function scan(what, endpoint, param, idKey, source) {
+    async function scan(what, endpoint, param, idKey, source, task) {
       const votes = [];
+      const known = what === 'posts' ? (state.uploadIds ? state.uploadIds.length : Number(user.post_upload_count) || 0)
+        : ((comments.length && !from && !to) ? comments.length : Number(user.comment_count) || 0);
+      const total = Math.max(1, known ? Math.min(known, SCAN_CAP) : SCAN_CAP);
       let scanned = 0, batch = [], full = false;
       const flush = async () => {
         if (!batch.length) return;
@@ -1138,7 +1266,7 @@
         const ids = batch.join(',');
         batch = [];
         setStatus(`Loading votes on their ${what}: ${scanned} checked, ${votes.length} votes`);
-        for await (const v of paged(`/${endpoint}.json?search[${param}]=${ids}&limit=320`, from, to)) {
+        for await (const v of paged(`/${endpoint}.json?search[${param}]=${ids}&limit=320`, from, to, false, lane)) {
           if (!set.has(String(v[idKey]))) throw new Error('the server returned votes for other items, so the list was not used');
           votes.push(v);
           if (votes.length >= maxV) { full = true; break; }
@@ -1147,22 +1275,24 @@
       for await (const id of source()) {
         if (stopFlag) break;
         batch.push(id); scanned++;
+        progressSet(task, scanned / total * 0.98);
         if (batch.length >= BATCH) await flush();
         if (full || scanned >= SCAN_CAP) break;
       }
       if (!full && !stopFlag) await flush();
+      progressSet(task, 1);
       const limited = full ? ' (stopped at the Max votes limit, so older ones may be missing)' : scanned >= SCAN_CAP ? ' (scan limit reached, older ones are not included)' : '';
       return { A: analyzeReceived(votes, idKey), note: `Covers votes on their ${scanned} most recent ${what}${limited}.` };
     }
 
     try {
-      state.recvPosts = await scan('posts', 'post_votes', 'post_id', 'post_id', uploadIds);
+      state.recvPosts = await scan('posts', 'post_votes', 'post_id', 'post_id', uploadIds, 'recvPosts');
     } catch (e) { state.recvPosts = fail(e, 'posts'); }
     render();
     if (stopFlag) return;
 
     try {
-      state.recvComments = await scan('comments', 'comment_votes', 'comment_id', 'comment_id', commentIds);
+      state.recvComments = await scan('comments', 'comment_votes', 'comment_id', 'comment_id', commentIds, 'recvComments');
     } catch (e) { state.recvComments = fail(e, 'comments'); }
     render();
     if (stopFlag) return;
@@ -1172,33 +1302,35 @@
     const ids = [...new Set([P && 'up', P && 'down'].filter(Boolean).flatMap((k) => topVoters(P, k).map((x) => x[0]))
       .concat([C && 'up', C && 'down'].filter(Boolean).flatMap((k) => topVoters(C, k).map((x) => x[0]))))]
       .filter((id) => !userInfo.has(String(id)));
-    await lookupUsers(ids);
+    await lookupUsers(ids, lane);
     render();
   }
 
   const lookupFailed = new Set();   // voter ids whose profile could not be loaded
 
   // Tries one batched request first, then falls back to one request per user for anything still missing.
-  async function lookupUsers(ids) {
+  async function lookupUsers(ids, lane) {
     const missing = new Set(ids.map(String));
     if (!missing.size) return;
     setStatus(`Looking up ${missing.size} voters…`);
     try {
       for (let i = 0; i < ids.length && !stopFlag; i += 100) {
         const chunk = ids.slice(i, i + 100);
-        const list = asList(await getJSON(`/users.json?search[id]=${chunk.join(',')}&limit=100`));
+        const list = asList(await getJSON(`/users.json?search[id]=${chunk.join(',')}&limit=100`, lane));
         for (const u of list) if (missing.has(String(u.id))) { userInfo.set(String(u.id), u); missing.delete(String(u.id)); }
-        await sleep(DELAY);
+        progressSet('voters', Math.min(i + 100, ids.length) / ids.length * 0.5);
       }
     } catch { /* fall back to one request per user below */ }
     let n = 0;
+    const todo = missing.size;
     for (const id of missing) {
       if (stopFlag) break;
       setStatus(`Looking up voters: ${++n}/${missing.size}`);
-      try { userInfo.set(id, await getJSON(`/users/${id}.json`)); lookupFailed.delete(id); }
+      progressSet('voters', 0.5 + 0.5 * n / todo * 0.98);
+      try { userInfo.set(id, await getJSON(`/users/${id}.json`, lane)); lookupFailed.delete(id); }
       catch (e) { lookupFailed.add(id); log(`Could not look up user #${id}: ${e.message}`); }
-      await sleep(DELAY);
     }
+    progressSet('voters', 1);
     render();
   }
 
