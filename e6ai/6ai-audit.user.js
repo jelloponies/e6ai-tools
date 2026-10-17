@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.24
+// @version      1.25
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -436,7 +436,7 @@
     <div id="ua-status"></div>
     <div id="ua-log"></div>
     <div id="ua-report"></div>
-    <details>
+    <details id="ua-sample" style="display:none">
       <summary>Comment sample</summary>
       <div class="row">
         <label>Sort
@@ -627,6 +627,7 @@
   // Walks a newest-first listing page by page, honouring the from/to window (ms timestamps or null).
   async function* paged(url, from, to) {
     let page = '1';
+    const lim = Number((/[?&]limit=(\d+)/.exec(url) || [])[1]) || 0;
     while (!stopFlag) {
       const list = asList(await getJSON(`${url}${url.includes('?') ? '&' : '?'}page=${page}`));
       if (!list.length) return;
@@ -636,6 +637,7 @@
         if (to && t > to) continue;
         yield item;
       }
+      if (lim && list.length < lim) return;   // short page = last page, no need to request an empty one
       page = 'b' + list[list.length - 1].id;
       await sleep(DELAY);
     }
@@ -955,6 +957,7 @@
   // ---------- comment sample ----------
   function renderComments() {
     const box = $('ua-comments');
+    $('ua-sample').style.display = comments.length ? '' : 'none';   // only show the sample once comments are loaded
     if (!comments.length) { box.innerHTML = '<span class="hint">No comments loaded.</span>'; return; }
     const txt = $('ua-c-text').value.trim().toLowerCase();
     const maxRaw = $('ua-c-max').value;
