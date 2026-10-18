@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.27
+// @version      1.29
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -29,6 +29,9 @@
   let blSort = { key: 'total', dir: -1 };   // sort order of the blacklist entries table
   let srcSort = { key: null, dir: 1 };      // sort order of the "Sources worth checking" table (null = default order)
   const SOURCE_ROWS_MAX = 100;               // most rows shown in that table
+  const views = {};                          // per section: which list is shown, 'down' (default) or 'up'
+  let secOpen = { 'Overview': true, 'Blacklist check': true };   // which report sections are open; remembered between audits and page loads
+  try { Object.assign(secOpen, JSON.parse(GM_getValue('open_sections', '{}'))); } catch { /* ignore */ }
 
   // ---- pure helpers begin ----
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -391,6 +394,13 @@
     #ua-panel details.ua-src > :not(summary) { margin-left: 8px; margin-right: 8px; }
     #ua-panel details.ua-src[open] > summary { border-bottom: 1px solid var(--ua-section-light); margin-bottom: 4px; }
     #ua-panel details.ua-src > table { width: calc(100% - 16px); margin-bottom: 8px; }
+    #ua-panel .ua-flags a { color: var(--ua-text); border-bottom: 1px dotted var(--ua-muted); }
+    #ua-panel .ua-flags a:hover { color: var(--ua-hover); text-decoration: none; }
+    #ua-panel .ua-allbar { text-align: right; }
+    #ua-panel details { scroll-margin-top: 44px; }
+    #ua-panel .ua-grp { margin: 18px 0 2px; padding-bottom: 3px; font-size: 11px; font-weight: bold; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--ua-accent); border-bottom: 1px solid var(--ua-section-light); }
+    #ua-panel button.ua-on { color: var(--ua-accent); border-color: var(--ua-accent); }
     #ua-panel details.ua-x { display: inline-block; margin: 0; }
     #ua-panel details.ua-x > summary { font-weight: normal; }
     #ua-panel .ua-links { max-width: 330px; max-height: 120px; overflow: auto; line-height: 1.5; }
@@ -446,7 +456,7 @@
     <div id="ua-stamp" class="hint" style="display:none"></div>
     <div id="ua-log"></div>
     <div id="ua-report"></div>
-    <details id="ua-sample" style="display:none">
+    <details id="ua-sample" data-sec="Comment sample" style="display:none">
       <summary>Comment sample</summary>
       <div class="row">
         <label>Sort
@@ -533,7 +543,7 @@
   // otherwise a soft curve is used that creeps up but never reaches the end before the work does.
   const PROGRESS_TASKS = {
     posts: ['A', 3], comments: ['A', 3], recvPosts: ['A', 3], recvComments: ['A', 2], voters: ['A', 1],
-    votes: ['B', 4], votedPosts: ['B', 2], cvotes: ['B', 2], votedComments: ['B', 1],
+    replaced: ['A', 1], votes: ['B', 4], votedPosts: ['B', 2], cvotes: ['B', 2], votedComments: ['B', 1],
   };
   let progress = { tasks: {}, shown: 0, active: false, pct: -1, label: '' };
   const soft = (n, k) => n / (n + k);
@@ -623,6 +633,41 @@
       d._xrow = row;
     } else if (d._xrow) { d._xrow.remove(); d._xrow = null; }
   }, true);
+  panel.addEventListener('toggle', (e) => {   // remember which sections are open
+    const d = e.target;
+    if (!d.matches || !d.matches('details[data-sec]')) return;
+    secOpen[d.dataset.sec] = d.open;
+    GM_setValue('open_sections', JSON.stringify(secOpen));
+  }, true);
+  $('ua-sample').open = !!secOpen['Comment sample'];
+  // Collapsing or expanding a section while scrolled down could shrink the panel and make the view jump, so the report keeps its height until the next re-render.
+  panel.addEventListener('click', (e) => {
+    const sm = e.target.closest && e.target.closest('summary');
+    const d = sm && sm.parentElement;
+    const root = $('ua-report');
+    if (!d || !d.matches('details[data-sec]')) return;
+    root.style.minHeight = root.offsetHeight + 'px';   // hold the current height both when collapsing and when expanding, so nothing shrinks and the view stays put
+  }, true);
+  // The blank space left by the height hold shrinks as you scroll up: whatever lies below the visible area is trimmed, but never real content.
+  let shrinkQueued = false;
+  panel.addEventListener('scroll', () => {
+    if (shrinkQueued) return;
+    shrinkQueued = true;
+    requestAnimationFrame(() => {
+      shrinkQueued = false;
+      const root = $('ua-report');
+      if (!parseFloat(root.style.minHeight)) return;
+      const st = panel.scrollTop;
+      const below = panel.scrollHeight - st - panel.clientHeight;
+      if (below < 2) return;
+      const cur = root.offsetHeight;
+      root.style.minHeight = '0px';
+      const natural = root.offsetHeight;
+      const want = Math.max(natural, cur - below);
+      root.style.minHeight = want > natural + 1 ? want + 'px' : '';
+      panel.scrollTop = st;
+    });
+  }, { passive: true });
   panel.addEventListener('input', saveSettings);
   panel.addEventListener('change', saveSettings);
 
@@ -758,58 +803,62 @@
   const table = (head, rows) => rows.length
     ? `<table><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</table>`
     : '<div class="hint">Nothing to show.</div>';
-  const section = (title, body) => `<details><summary>${esc(title)}</summary>${body}</details>`;
+  const section = (title, body) => `<details data-sec="${esc(title)}"${secOpen[title] ? ' open' : ''}><summary>${esc(title)}</summary>${body}</details>`;
+  const viewOf = (key) => (views[key] === 'up' ? 'up' : 'down');
+  const viewToggle = (key, downLabel, upLabel) => { const v = viewOf(key); return `<div><button data-view-key="${esc(key)}" data-view="down" class="${v === 'down' ? 'ua-on' : ''}">${esc(downLabel)}</button><button data-view-key="${esc(key)}" data-view="up" class="${v === 'up' ? 'ua-on' : ''}">${esc(upLabel)}</button></div>`; };
+  const group = (title, html) => (html ? `<div class="ua-grp">${esc(title)}</div>${html}` : '');
 
   function buildFlags() {
     const f = [];
+    const add = (sec, view, sub, t) => f.push({ t, sec, view, sub });
     const P = state.posts && state.posts.stats, C = state.comments && state.comments.stats, V = state.votes && state.votes.A;
     if (P && P.total >= 20) {
-      if (P.topDomain && P.topDomainCount / P.total >= 0.5) f.push(`${pct(P.topDomainCount, P.total)}% of their uploads list the same source domain (${P.topDomain}).`);
-      if (P.deleted / P.total >= 0.25) f.push(`${pct(P.deleted, P.total)}% of their uploads are deleted.`);
+      if (P.topDomain && P.topDomainCount / P.total >= 0.5) add('Uploads', null, null, `${pct(P.topDomainCount, P.total)}% of their uploads list the same source domain (${P.topDomain}).`);
+      if (P.deleted / P.total >= 0.25) add('Uploads', null, null, `${pct(P.deleted, P.total)}% of their uploads are deleted.`);
     }
     if (P && P.sources) {
-      const SS = P.sources, kindText = { profile: ' (looks like a profile or landing page)', home: ' (just a site front page)', invite: ' (an invite link)' };
-      if (SS.invalidPosts >= INVALID_SOURCE_FLAG) f.push(`${SS.invalidPosts} of their posts ${SS.invalidPosts === 1 ? 'has' : 'have'} a source that isn't a valid web link (most common: "${SS.invalidTop.url}", ${SS.invalidTop.ids.length} post${SS.invalidTop.ids.length === 1 ? '' : 's'}).`);
-      if (SS.sameTop) f.push(`${SS.sameTop.ids.length} of their posts list the identical source ${SS.sameTop.url}${kindText[SS.sameTop.kind] || ''}.`);
-      if (SS.landingPosts >= PROFILE_SOURCE_FLAG) f.push(`${SS.landingPosts} of their posts ${SS.landingPosts === 1 ? 'has' : 'have'} a source that looks like a profile or landing page.`);
-      if (SS.chatPosts >= CHAT_SOURCE_FLAG) f.push(`${SS.chatPosts} of their posts ${SS.chatPosts === 1 ? 'has' : 'have'} a source that is an invite link.`);
+      const SS = P.sources, see = ' Details under Uploads → Sources worth checking.', kindText = { profile: ' (looks like a profile or landing page)', home: ' (just a site front page)', invite: ' (an invite link)' };
+      if (SS.invalidPosts >= INVALID_SOURCE_FLAG) add('Uploads', null, 'src', `${SS.invalidPosts} of their posts ${SS.invalidPosts === 1 ? 'has' : 'have'} a source that isn't a valid web link (most common: "${SS.invalidTop.url}", ${SS.invalidTop.ids.length} post${SS.invalidTop.ids.length === 1 ? '' : 's'}).${see}`);
+      if (SS.sameTop) add('Uploads', null, 'src', `${SS.sameTop.ids.length} of their posts list the identical source ${SS.sameTop.url}${kindText[SS.sameTop.kind] || ''}.${see}`);
+      if (SS.landingPosts >= PROFILE_SOURCE_FLAG) add('Uploads', null, 'src', `${SS.landingPosts} of their posts ${SS.landingPosts === 1 ? 'has' : 'have'} a source that looks like a profile or landing page.${see}`);
+      if (SS.chatPosts >= CHAT_SOURCE_FLAG) add('Uploads', null, 'src', `${SS.chatPosts} of their posts ${SS.chatPosts === 1 ? 'has' : 'have'} a source that is an invite link.${see}`);
     }
-    if (P && P.maxPerHour >= 50) f.push(`Uploaded up to ${P.maxPerHour} posts within a single hour.`);
+    if (P && P.maxPerHour >= 50) add('Uploads', null, null, `Uploaded up to ${P.maxPerHour} posts within a single hour.`);
     if (C) {
-      if (C.total >= 10 && C.negative / C.total >= 0.4) f.push(`${pct(C.negative, C.total)}% of their comments have a negative score.`);
-      if (C.repeated[0]) f.push(`The same comment was posted ${C.repeated[0].n} times.`);
+      if (C.total >= 10 && C.negative / C.total >= 0.4) add('Comments', null, null, `${pct(C.negative, C.total)}% of their comments have a negative score.`);
+      if (C.repeated[0]) add('Comments', null, null, `The same comment was posted ${C.repeated[0].n} times.`);
     }
     if (V) {
       const tot = V.up + V.down;
-      if (tot >= 50 && V.down / tot >= 0.7) f.push(`${pct(V.down, tot)}% of their post votes are downvotes (${V.down} of ${tot}).`);
+      if (tot >= 50 && V.down / tot >= 0.7) add('Votes on posts', 'down', null, `${pct(V.down, tot)}% of their post votes are downvotes (${V.down} of ${tot}).`);
       const top = Object.entries(V.byUploader).sort((a, b) => b[1].down - a[1].down)[0];
-      if (top && top[1].down >= 10 && top[1].down / V.down >= 0.25) f.push(`${pct(top[1].down, V.down)}% of their downvotes (${top[1].down}) went to one uploader (${V.names[top[0]] || 'user #' + top[0]}).`);
+      if (top && top[1].down >= 10 && top[1].down / V.down >= 0.25) add('Votes on posts', 'down', null, `${pct(top[1].down, V.down)}% of their downvotes (${top[1].down}) went to one uploader (${V.names[top[0]] || 'user #' + top[0]}).`);
       const topUp = Object.entries(V.byUploader).sort((a, b) => b[1].up - a[1].up)[0];
-      if (topUp && topUp[1].up >= 10 && topUp[1].up / V.up >= 0.25) f.push(`${pct(topUp[1].up, V.up)}% of their upvotes (${topUp[1].up}) went to one uploader (${V.names[topUp[0]] || 'user #' + topUp[0]}).`);
-      if (V.blDown.length >= 5 && V.blDown.length / V.down >= 0.2) f.push(`${V.blDown.length} of their ${V.down} downvotes (${pct(V.blDown.length, V.down)}%) were on posts their blacklist hides.`);
+      if (topUp && topUp[1].up >= 10 && topUp[1].up / V.up >= 0.25) add('Votes on posts', 'up', null, `${pct(topUp[1].up, V.up)}% of their upvotes (${topUp[1].up}) went to one uploader (${V.names[topUp[0]] || 'user #' + topUp[0]}).`);
+      if (V.blDown.length >= 5 && V.blDown.length / V.down >= 0.2) add('Blacklist check', null, null, `${V.blDown.length} of their ${V.down} downvotes (${pct(V.blDown.length, V.down)}%) were on posts their blacklist hides.`);
       const burst = maxInWindow(V.timesAll, 3600000);
-      if (burst >= 100) f.push(`Cast up to ${burst} votes within a single hour.`);
+      if (burst >= 100) add('Votes on posts', null, null, `Cast up to ${burst} votes within a single hour.`);
       const quick = V.delaysDown.filter((h) => h <= 1).length;
-      if (V.delaysDown.length >= 20 && quick / V.delaysDown.length >= 0.5) f.push(`${pct(quick, V.delaysDown.length)}% of their downvotes came within an hour of the post being uploaded.`);
+      if (V.delaysDown.length >= 20 && quick / V.delaysDown.length >= 0.5) add('Votes on posts', 'down', null, `${pct(quick, V.delaysDown.length)}% of their downvotes came within an hour of the post being uploaded.`);
     }
     const CV = state.cvotes && !state.cvotes.error ? state.cvotes : null;
     if (CV) {
       const ctot = CV.up + CV.down;
-      if (ctot >= 30 && CV.down / ctot >= 0.7) f.push(`${pct(CV.down, ctot)}% of their comment votes are downvotes (${CV.down} of ${ctot}).`);
+      if (ctot >= 30 && CV.down / ctot >= 0.7) add('Votes on comments', 'down', null, `${pct(CV.down, ctot)}% of their comment votes are downvotes (${CV.down} of ${ctot}).`);
       const topC = Object.values(CV.byAuthor).sort((a, b) => b.down - a.down)[0];
-      if (topC && topC.down >= 10 && topC.down / CV.down >= 0.25) f.push(`${pct(topC.down, CV.down)}% of their comment downvotes (${topC.down}) went to one commenter (${topC.name || 'user #' + topC.id}).`);
+      if (topC && topC.down >= 10 && topC.down / CV.down >= 0.25) add('Votes on comments', 'down', null, `${pct(topC.down, CV.down)}% of their comment downvotes (${topC.down}) went to one commenter (${topC.name || 'user #' + topC.id}).`);
     }
 
     const B = state.blacklist;
     if (V && B && !B.error) {
       const tot = V.up + V.down, checked = V.downChecked || 0, unexplained = checked - V.blDown.length;
       if (checked >= 20 && tot && V.down / tot >= 0.5 && unexplained / checked >= 0.8) {
-        f.push(`${unexplained} of their ${checked} downvotes (${pct(unexplained, checked)}%) were on posts their blacklist does not hide${B.entries.length ? '' : ' (their blacklist is empty)'}.`);
+        add('Blacklist check', null, null, `${unexplained} of their ${checked} downvotes (${pct(unexplained, checked)}%) were on posts their blacklist does not hide${B.entries.length ? '' : ' (their blacklist is empty)'}.`);
       }
       const often = Object.keys(V.tagDown).map((t) => ({ t, d: V.tagDown[t], u: V.tagUp[t] || 0 }))
         .filter((x) => x.d >= 10 && x.d / (x.d + x.u) >= 0.9 && !tagInBlacklist(B.entries, x.t))
         .sort((a, b) => b.d - a.d).slice(0, 3);
-      if (often.length) f.push(`Tags they downvote almost every time without blacklisting: ${often.map((x) => `${x.t} (${x.d} of ${x.d + x.u})`).join(', ')}.`);
+      if (often.length) add('Tags they vote on', 'down', null, `Tags they downvote almost every time without blacklisting: ${often.map((x) => `${x.t} (${x.d} of ${x.d + x.u})`).join(', ')}.`);
     }
 
     const created = state.user && Date.parse(state.user.created_at);
@@ -820,7 +869,7 @@
         if (P && P.total >= 50) parts.push(`${P.total} uploads`);
         if (V && V.up + V.down >= 300) parts.push(`${V.up + V.down} post votes`);
         if (C && C.total >= 100) parts.push(`${C.total} comments`);
-        if (parts.length) f.push(`The account is only ${Math.max(1, Math.round(age))} day(s) old but already has ${parts.join(', ')}.`);
+        if (parts.length) add('Overview', null, null, `The account is only ${Math.max(1, Math.round(age))} day(s) old but already has ${parts.join(', ')}.`);
       }
     }
     const isNew = (id) => { const u = userInfo.get(String(id)), t = u && Date.parse(u.created_at); return !!t && Date.now() - t <= 30 * 864e5; };
@@ -830,12 +879,12 @@
       const vs = Object.entries(R.byVoter);
       if (R.up >= 20) {
         const top3 = vs.map(([, v]) => v.up).sort((a, b) => b - a).slice(0, 3).reduce((a, b) => a + b, 0);
-        if (top3 / R.up >= 0.5) f.push(`3 voters account for ${pct(top3, R.up)}% of the upvotes on their ${what} (${top3} of ${R.up}).`);
+        if (top3 / R.up >= 0.5) add('Votes on their ' + what, 'up', null, `3 voters account for ${pct(top3, R.up)}% of the upvotes on their ${what} (${top3} of ${R.up}).`);
       }
       const td = [...vs].sort((a, b) => b[1].down - a[1].down)[0];
-      if (td && td[1].down >= 10 && td[1].down / R.down >= 0.25) f.push(`${pct(td[1].down, R.down)}% of the downvotes on their ${what} (${td[1].down}) came from one voter (${nameOf(td[0])}).`);
+      if (td && td[1].down >= 10 && td[1].down / R.down >= 0.25) add('Votes on their ' + what, 'down', null, `${pct(td[1].down, R.down)}% of the downvotes on their ${what} (${td[1].down}) came from one voter (${nameOf(td[0])}).`);
       const fresh = vs.filter(([id, v]) => v.up >= 5 && isNew(id));
-      if (fresh.length) f.push(`${fresh.length} frequent upvoter(s) on their ${what} have accounts under 30 days old: ${fresh.slice(0, 5).map(([id, v]) => `${nameOf(id)} (${v.up})`).join(', ')}.`);
+      if (fresh.length) add('Votes on their ' + what, 'up', null, `${fresh.length} frequent upvoter(s) on their ${what} have accounts under 30 days old: ${fresh.slice(0, 5).map(([id, v]) => `${nameOf(id)} (${v.up})`).join(', ')}.`);
     }
     return f;
   }
@@ -870,6 +919,16 @@
       (rows.length ? tbl : '<div class="hint">Nothing stands out.</div>') + '</details>';
   }
 
+  // Share of the user's original uploads that were replaced. Replaced posts that someone else submitted are credited to that person now,
+  // so they are no longer in the user's upload list and are added back to get the number of posts they originally uploaded.
+  function replShare(posts) {
+    if (!state.uploadIds || !state.posts || !state.posts.stats.total) return '';
+    const have = new Set(state.uploadIds.map(String));
+    const original = state.posts.stats.total + posts.filter((id) => !have.has(String(id))).length;
+    const p = posts.length / original * 100;
+    return ` (${p < 10 ? p.toFixed(1) : Math.round(p)}% of ${original} posts)`;
+  }
+
   function secPosts() {
     const S = state.posts.stats, who = String(state.user.name).replace(/ /g, '_');
     if (!S.total) return section('Uploads', '<div class="hint">No uploads found.</div>');
@@ -881,6 +940,8 @@
       ['Ratings (s/q/e)', `${S.ratings.s || 0} / ${S.ratings.q || 0} / ${S.ratings.e || 0}`],
       ['Uploads in last 7 / 30 days', `${S.last7} / ${S.last30}`],
       ['Most uploads within one hour', S.maxPerHour],
+      ...(state.replaced ? [['Uploads replaced', state.replaced.error ? esc(state.replaced.error)
+        : drill(`${state.replaced.posts.length}${replShare(state.replaced.posts)}`, state.replaced.posts, postLink)]] : []),
       ['No source', `${S.noSource} (${pct(S.noSource, S.total)}%)`],
       ['With a malformed source', S.malformed],
       ['Average score / favorites', `${fnum(S.scoreSum / S.total)} / ${(S.favSum / S.total).toFixed(1)}`],
@@ -926,8 +987,10 @@
       ['Median time from upload to vote (down / up)', `${med(A.delaysDown)} / ${med(A.delaysUp)}`],
       ['Downvotes within 1 hour of upload', `${quick} (${pct(quick, A.delaysDown.length)}%)`],
     ]) + '<div class="hint">Click an Up or Down number to list the posts.</div>' +
-      '<b>Uploaders they downvote most</b>' + (downRows.length ? table(['Uploader', 'Up', 'Down', 'Net', 'Share of downvotes'], downRows) : empty) +
-      '<b>Uploaders they upvote most</b>' + (upRows.length ? table(['Uploader', 'Up', 'Down', 'Net', 'Share of upvotes'], upRows) : empty);
+      viewToggle('Votes on posts', 'Uploaders they downvote most', 'Uploaders they upvote most') +
+      (viewOf('Votes on posts') === 'down'
+        ? (downRows.length ? table(['Uploader', 'Up', 'Down', 'Net', 'Share of downvotes'], downRows) : empty)
+        : (upRows.length ? table(['Uploader', 'Up', 'Down', 'Net', 'Share of upvotes'], upRows) : empty));
     return section('Votes on posts', body, true);
   }
 
@@ -991,20 +1054,32 @@
       ['Top 3 voters\' share of upvotes / downvotes', `${share('up')} / ${share('down')}`],
     ]) + `<div class="hint">Click an Up or Down number to list the ${kind}. Names and join dates are looked up for the top voters only.</div>` +
       `<div class="hint">${esc(slot.note || '')}</div>` +
-      '<b>Who upvotes them most</b>' + (ur.length ? table([...head, 'Share of upvotes'], ur) : empty) +
-      '<b>Who downvotes them most</b>' + (dr.length ? table([...head, 'Share of downvotes'], dr) : empty));
+      viewToggle(title, 'Who downvotes them most', 'Who upvotes them most') +
+      (viewOf(title) === 'down'
+        ? (dr.length ? table([...head, 'Share of downvotes'], dr) : empty)
+        : (ur.length ? table([...head, 'Share of upvotes'], ur) : empty)));
+  }
+
+  function tagRows(V, kind) {
+    const base = V[kind] / (V.up + V.down);
+    const rows = Object.keys(kind === 'down' ? V.tagDown : V.tagUp).map((t) => ({ t, d: V.tagDown[t] || 0, u: V.tagUp[t] || 0 }))
+      .filter((x) => x[kind === 'down' ? 'd' : 'u'] >= 3 && x.d + x.u >= 5 && x[kind === 'down' ? 'd' : 'u'] / (x.d + x.u) > base)
+      .sort((a, b) => b[kind === 'down' ? 'd' : 'u'] / (b.d + b.u) - a[kind === 'down' ? 'd' : 'u'] / (a.d + a.u) || b[kind === 'down' ? 'd' : 'u'] - a[kind === 'down' ? 'd' : 'u']).slice(0, 15);
+    return { base, rows };
   }
 
   function secTags() {
     const V = state.votes && state.votes.A;
-    if (!V || !V.down) return '';
-    const base = V.down / (V.up + V.down);
-    const rows = Object.keys(V.tagDown).map((t) => ({ t, d: V.tagDown[t], u: V.tagUp[t] || 0 }))
-      .filter((x) => x.d >= 3 && x.d + x.u >= 5 && x.d / (x.d + x.u) > base)
-      .sort((a, b) => b.d / (b.d + b.u) - a.d / (a.d + a.u) || b.d - a.d).slice(0, 15)
-      .map((x) => [searchLink(x.t, x.t), downN(x.d), upN(x.u), pct(x.d, x.d + x.u) + '%']);
-    return section('Tags they downvote', `<div class="hint">Tags that appear on their downvoted posts more often than their overall downvote share (${Math.round(base * 100)}%). Needs at least 5 votes and 3 downvotes per tag.</div>` +
-      table(['Tag', 'Down', 'Up', 'Downvote share'], rows));
+    if (!V || !(V.up + V.down)) return '';
+    const kind = viewOf('Tags they vote on'), word = kind === 'up' ? 'upvote' : 'downvote';
+    const toggle = viewToggle('Tags they vote on', 'Downvoted tags', 'Upvoted tags');
+    if (!V[kind]) return section('Tags they vote on', toggle + `<div class="hint">No ${word}s in this timespan.</div>`);
+    const { base, rows } = tagRows(V, kind);
+    const body = rows.map((x) => kind === 'down'
+      ? [searchLink(x.t, x.t), downN(x.d), upN(x.u), pct(x.d, x.d + x.u) + '%']
+      : [searchLink(x.t, x.t), upN(x.u), downN(x.d), pct(x.u, x.d + x.u) + '%']);
+    return section('Tags they vote on', toggle + `<div class="hint">Tags that appear on their ${word}d posts more often than their overall ${word} share (${Math.round(base * 100)}%). Needs at least 5 votes and 3 ${word}s per tag.</div>` +
+      table(kind === 'down' ? ['Tag', 'Down', 'Up', 'Downvote share'] : ['Tag', 'Up', 'Down', 'Upvote share'], body));
   }
 
   function secCommentVotes() {
@@ -1022,22 +1097,30 @@
       ['Downvote share', pct(C.down, C.up + C.down) + '%'],
       ['Comments that could not be loaded', C.missing],
     ]) + '<div class="hint">Click an Up or Down number to list the comments.</div>' +
-      '<b>Commenters they downvote most</b>' + (dr.length ? table(['Commenter', 'Up', 'Down', 'Net'], dr) : empty) +
-      '<b>Commenters they upvote most</b>' + (ur.length ? table(['Commenter', 'Up', 'Down', 'Net'], ur) : empty));
+      viewToggle('Votes on comments', 'Commenters they downvote most', 'Commenters they upvote most') +
+      (viewOf('Votes on comments') === 'down'
+        ? (dr.length ? table(['Commenter', 'Up', 'Down', 'Net'], dr) : empty)
+        : (ur.length ? table(['Commenter', 'Up', 'Down', 'Net'], ur) : empty)));
   }
 
   function render() {
     const root = $('ua-report');
+    const sample = $('ua-sample');
+    root.style.minHeight = '';
+    panel.appendChild(sample);   // park the comment sample outside the report while it is rebuilt
     if (!state.user) { root.innerHTML = ''; return; }
     const opens = [...root.querySelectorAll('details')].map((d) => d.open);   // keep what the user expanded
     const flags = buildFlags();
     root.innerHTML =
-      (flags.length ? `<div class="ua-flags"><b>Worth a look</b> <span class="hint">(prompts for review, not verdicts)</span><ul>${flags.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : '') +
-      secOverview() + (state.posts ? secPosts() : '') + (state.comments ? secComments() : '') +
-      (state.votes ? secVotes() + secBlacklist() + secTags() : '') + secCommentVotes() +
-      secReceived('Votes on their posts', 'posts', state.recvPosts) + secReceived('Votes on their comments', 'comments', state.recvComments);
+      (flags.length ? `<div class="ua-flags"><b>Worth a look</b> <span class="hint">(prompts for review, not verdicts; click one to jump to it)</span><ul>${flags.map((x) => `<li><a href="#" data-goto="${esc(x.sec)}"${x.view ? ` data-view="${x.view}"` : ''}${x.sub ? ` data-sub="${x.sub}"` : ''}>${esc(x.t)}</a></li>`).join('')}</ul></div>` : '') +
+      '<div class="ua-allbar"><button data-all="open">Expand all</button><button data-all="close">Collapse all</button></div>' +
+      group('Account', secOverview() + (state.posts ? secPosts() : '') + (state.comments ? secComments() : '') + '<div id="ua-sample-slot"></div>') +
+      group('Votes they cast', (state.votes ? secVotes() + secBlacklist() + secTags() : '') + secCommentVotes()) +
+      group('Votes they received', secReceived('Votes on their posts', 'posts', state.recvPosts) + secReceived('Votes on their comments', 'comments', state.recvComments));
     const ds = root.querySelectorAll('details');
     if (ds.length === opens.length) ds.forEach((d, i) => { d.open = opens[i]; });
+    const slot = $('ua-sample-slot');
+    if (slot) slot.replaceWith(sample);   // the sample sits right under Comments
   }
 
   // ---------- comment sample ----------
@@ -1106,7 +1189,7 @@
       render();
 
       const names = [];
-      if ($('ua-do-posts').checked) names.push('posts');
+      if ($('ua-do-posts').checked) names.push('posts', 'replaced');
       if ($('ua-do-comments').checked) names.push('comments');
       if ($('ua-do-received').checked) names.push('recvPosts', 'recvComments', 'voters');
       if ($('ua-do-votes').checked) names.push('votes', 'votedPosts', 'cvotes', 'votedComments');
@@ -1131,6 +1214,8 @@
           render();
         } catch (e) { log('Uploads failed: ' + e.message); }
       }
+
+      if ($('ua-do-posts').checked && state.uploadIds && !stopFlag) await auditReplaced(user, 'A');
 
       if ($('ua-do-comments').checked && !stopFlag) {
         try {
@@ -1170,6 +1255,36 @@
         showStamp(ts, false);
       }
     }
+  }
+
+  // Uploads of this user that were replaced. When a replacement is approved the post is credited to whoever submitted it, so the user's current
+  // uploads can't be used for this. Instead each replaced post has an "original" record whose creator is the original uploader; a post counts
+  // for this user when that record is theirs and the post has at least one approved replacement. The whole list is read newest-first.
+  async function auditReplaced(user, lane) {
+    const REPLACED_SCAN_CAP = 12000;   // most replacement records (site-wide) looked through
+    const origCreator = new Map();     // post id -> creator of its "original" record
+    const approved = new Map();        // post id -> number of approved replacements
+    let scanned = 0, topId = 0, capped = false;
+    try {
+      for await (const r of paged('/post_replacements.json?limit=320', null, null, true, lane)) {
+        scanned++;
+        if (!topId) topId = Number(r.id) || 0;
+        if (r.status === 'original' || (r.status === undefined && Number(r.sequence_number) === 0)) origCreator.set(String(r.post_id), Number(r.creator_id));
+        else if (r.status === 'approved') approved.set(String(r.post_id), (approved.get(String(r.post_id)) || 0) + 1);
+        if (scanned % 100 === 0) {
+          setStatus(`Checking replacements: ${scanned} looked through`);
+          progressSet('replaced', topId ? (topId - Number(r.id)) / topId * 0.98 : soft(scanned, 3000) * 0.98);
+        }
+        if (scanned >= REPLACED_SCAN_CAP) { capped = true; log(`Stopped looking through replacements after ${REPLACED_SCAN_CAP}.`); break; }
+      }
+      const posts = [...origCreator].filter(([id, creator]) => creator === Number(user.id) && approved.has(id)).map(([id]) => Number(id));
+      state.replaced = { posts, total: posts.reduce((n, id) => n + approved.get(String(id)), 0), scanned, capped };
+    } catch (e) {
+      state.replaced = { error: [401, 403, 404].includes(e.status) ? `Your role can't view replacements (${e.message}).` : e.message };
+      log('Replacements failed: ' + e.message);
+    }
+    progressSet('replaced', 1);
+    render();
   }
 
   async function auditVotes(user, from, to, maxV, lane) {
@@ -1335,6 +1450,30 @@
   }
 
   $('ua-report').addEventListener('click', (e) => {
+    const gt = e.target.closest && e.target.closest('a[data-goto]');
+    if (gt) {
+      e.preventDefault();
+      const sec = gt.dataset.goto;
+      if (gt.dataset.view) views[sec] = gt.dataset.view;
+      render();
+      const d = $('ua-report').querySelector(`details[data-sec="${sec.replace(/"/g, '\\"')}"]`);
+      if (d) {
+        d.open = true;
+        let target = d;
+        if (gt.dataset.sub === 'src') { const x = d.querySelector('details.ua-src'); if (x) { x.open = true; target = x; } }
+        target.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
+      return;
+    }
+    const ab = e.target.closest && e.target.closest('button[data-all]');
+    if (ab) {
+      const open = ab.dataset.all === 'open';
+      $('ua-report').querySelectorAll('details[data-sec]').forEach((d) => { d.open = open; });
+      if (!open) ab.closest('.ua-allbar').scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    const tb = e.target.closest && e.target.closest('button[data-view-key]');
+    if (tb) { views[tb.dataset.viewKey] = tb.dataset.view; render(); return; }
     const hs = e.target.closest && e.target.closest('th[data-src-sort]');
     if (hs) {
       const k = hs.dataset.srcSort;
