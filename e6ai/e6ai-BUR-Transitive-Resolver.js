@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         e6ai BUR Transitive Resolver
 // @namespace    http://tampermonkey.net/
-// @version      2025-06-10
+// @version      2026-10-20
 // @description  One click resolve all transitives
-// @version      1.1
 // @author       Tarrgon
 // @contributor  DRLa
 // @contributor  Jelloponies
