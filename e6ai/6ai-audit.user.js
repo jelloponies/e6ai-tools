@@ -1741,7 +1741,7 @@
     });
     root.querySelectorAll('a[href^="/"]').forEach((a) => a.setAttribute('href', location.origin + a.getAttribute('href')));
     root.querySelectorAll('[title]').forEach((n) => { if (!(mode === 'html' && n.matches('a.ua-cp, th[data-bl-sort], th[data-src-sort], a[data-goto]'))) n.removeAttribute('title'); });
-    root.querySelectorAll('details[data-sec], details.ua-src').forEach((d) => { if (mode === 'html') d.removeAttribute('open'); else d.setAttribute('open', ''); });   // the HTML file starts collapsed; the picture needs everything open
+    root.querySelectorAll('details[data-sec], details.ua-src, details:not(.ua-x)').forEach((d) => { if (mode === 'html') d.removeAttribute('open'); else d.setAttribute('open', ''); });   // the HTML file starts collapsed; the picture needs everything open
     root.querySelectorAll('details.ua-x').forEach((d) => d.removeAttribute('open'));
     const html0 = root.innerHTML;
     const html = (mode === 'html' ? html0 : html0.replace(/ Click a column header to sort\./g, '').replace('; click one to jump to it)', ')')) + (mode === 'html' ? EXPORT_SCRIPT : '');
