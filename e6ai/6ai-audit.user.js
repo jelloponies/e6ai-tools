@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.30
+// @version      1.31
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -138,6 +138,7 @@
   // ---- source checks ----
   // Tweak these to taste: how many posts must share one identical source before it is listed/flagged,
   // and how many posts with profile-looking sources trigger the flag.
+  const ONE_PERSON_DOWN_SHARE = 0.2;   // flag when one person accounts for at least this share of the downvotes (min. 10 downvotes): received from one voter, cast on one uploader or one commenter
   const SAME_SOURCE_MIN = 5, PROFILE_SOURCE_FLAG = 1, INVALID_SOURCE_FLAG = 1, CHAT_SOURCE_FLAG = 1;   // both 1 = always warn, however few posts are affected
 
   function parseSource(src) {
@@ -840,7 +841,7 @@
       const tot = V.up + V.down;
       if (tot >= 50 && V.down / tot >= 0.7) add('Votes on posts', 'down', null, `${pct(V.down, tot)}% of their post votes are downvotes (${V.down} of ${tot}).`);
       const top = Object.entries(V.byUploader).sort((a, b) => b[1].down - a[1].down)[0];
-      if (top && top[1].down >= 10 && top[1].down / V.down >= 0.25) add('Votes on posts', 'down', null, `${pct(top[1].down, V.down)}% of their downvotes (${top[1].down}) went to one uploader (${V.names[top[0]] || 'user #' + top[0]}).`);
+      if (top && top[1].down >= 10 && top[1].down / V.down >= ONE_PERSON_DOWN_SHARE) add('Votes on posts', 'down', null, `${pct(top[1].down, V.down)}% of their downvotes (${top[1].down}) went to one uploader (${V.names[top[0]] || 'user #' + top[0]}).`);
       const topUp = Object.entries(V.byUploader).sort((a, b) => b[1].up - a[1].up)[0];
       if (topUp && topUp[1].up >= 10 && topUp[1].up / V.up >= 0.25) add('Votes on posts', 'up', null, `${pct(topUp[1].up, V.up)}% of their upvotes (${topUp[1].up}) went to one uploader (${V.names[topUp[0]] || 'user #' + topUp[0]}).`);
       if (V.blDown.length >= 5 && V.blDown.length / V.down >= 0.2) add('Blacklist check', null, null, `${V.blDown.length} of their ${V.down} downvotes (${pct(V.blDown.length, V.down)}%) were on posts their blacklist hides.`);
@@ -854,7 +855,7 @@
       const ctot = CV.up + CV.down;
       if (ctot >= 30 && CV.down / ctot >= 0.7) add('Votes on comments', 'down', null, `${pct(CV.down, ctot)}% of their comment votes are downvotes (${CV.down} of ${ctot}).`);
       const topC = Object.values(CV.byAuthor).sort((a, b) => b.down - a.down)[0];
-      if (topC && topC.down >= 10 && topC.down / CV.down >= 0.25) add('Votes on comments', 'down', null, `${pct(topC.down, CV.down)}% of their comment downvotes (${topC.down}) went to one commenter (${topC.name || 'user #' + topC.id}).`);
+      if (topC && topC.down >= 10 && topC.down / CV.down >= ONE_PERSON_DOWN_SHARE) add('Votes on comments', 'down', null, `${pct(topC.down, CV.down)}% of their comment downvotes (${topC.down}) went to one commenter (${topC.name || 'user #' + topC.id}).`);
     }
 
     const B = state.blacklist;
@@ -890,7 +891,7 @@
         if (top3 / R.up >= 0.5) add('Votes on their ' + what, 'up', null, `3 voters account for ${pct(top3, R.up)}% of the upvotes on their ${what} (${top3} of ${R.up}).`);
       }
       const td = [...vs].sort((a, b) => b[1].down - a[1].down)[0];
-      if (td && td[1].down >= 10 && td[1].down / R.down >= 0.25) add('Votes on their ' + what, 'down', null, `${pct(td[1].down, R.down)}% of the downvotes on their ${what} (${td[1].down}) came from one voter (${nameOf(td[0])}).`);
+      if (td && td[1].down >= 10 && td[1].down / R.down >= ONE_PERSON_DOWN_SHARE) add('Votes on their ' + what, 'down', null, `${pct(td[1].down, R.down)}% of the downvotes on their ${what} (${td[1].down}) came from one voter (${nameOf(td[0])}).`);
       const fresh = vs.filter(([id, v]) => v.up >= 5 && isNew(id));
       if (fresh.length) add('Votes on their ' + what, 'up', null, `${fresh.length} frequent upvoter(s) on their ${what} have accounts under 30 days old: ${fresh.slice(0, 5).map(([id, v]) => `${nameOf(id)} (${v.up})`).join(', ')}.`);
     }
@@ -1675,7 +1676,7 @@
       if (!t.closest) return;
       var vb = t.closest('.ua-vb');
       if (vb && vb.dataset.v) { setView(vb.closest('.ua-vw'), vb.dataset.v); return; }
-      if (vb && vb.dataset.all) { $$('details[data-sec]').forEach(function (d) { d.open = vb.dataset.all === 'open'; }); return; }
+      if (vb && vb.dataset.all) { $$('details:not(.ua-x)').forEach(function (d) { d.open = vb.dataset.all === 'open'; }); return; }
       var cp = t.closest('a.ua-cp');
       if (cp) {
         e.preventDefault();
@@ -1865,7 +1866,7 @@
     const ab = e.target.closest && e.target.closest('button[data-all]');
     if (ab) {
       const open = ab.dataset.all === 'open';
-      $('ua-report').querySelectorAll('details[data-sec]').forEach((d) => { d.open = open; });
+      $('ua-report').querySelectorAll('details:not(.ua-x)').forEach((d) => { d.open = open; });
       if (!open) ab.closest('.ua-allbar').scrollIntoView({ block: 'nearest' });
       return;
     }
