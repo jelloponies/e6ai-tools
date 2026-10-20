@@ -1528,7 +1528,7 @@
       '<button data-act="custom" title="Only the sections whose box you ticked, as an HTML file you can send to someone">Export selected (<span data-pickcount>0</span>)</button>' +
       '<button data-act="png" title="The whole report as one picture, copied to the clipboard so you can paste it straight into Discord">Copy PNG</button>' +
       '<button data-act="pngsel" title="Only the sections whose box you ticked, as one picture copied to the clipboard">Copy PNG selected (<span data-pickcount>0</span>)</button>' +
-      '<div class="hint">Tick the box next to a section title to include it in “Export selected”. The “copy IDs” links give DText for tickets and feedback (Shift-click a copy link: plain comma-separated IDs).</div></div>';
+      '<div class="hint">Tick the box next to a section title to include it in “Export selected” and "Copy PNG selected".</div></div>';
   }
   function updatePickCount() { $('ua-report').querySelectorAll('[data-pickcount]').forEach((x) => { x.textContent = $('ua-report').querySelectorAll('input[data-pick]:checked').length; }); }
 
