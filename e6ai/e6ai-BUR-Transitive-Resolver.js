@@ -7,6 +7,7 @@
 // @contributor  DRLa
 // @contributor  Jelloponies
 // @match        https://e6ai.net/bulk_update_requests/*
+// @match        https://e621.net/bulk_update_requests/*
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @grant        none
 // ==/UserScript==
