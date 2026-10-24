@@ -6,6 +6,7 @@
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
 // @match        https://e6ai.net/*
+// @match        https://e621.net/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
