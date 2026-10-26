@@ -1,12 +1,11 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.31
+// @version      1.32
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
 // @match        https://e6ai.net/*
-// @match        https://e621.net/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -36,6 +35,8 @@
   const secOpen = {};   // which report sections are open: none at first, and what you open is only kept until the next audit or page load
 
   // ---- pure helpers begin ----
+  // A locked vote: flagged as locked by the server, or a vote with no direction (score 0, shown as "Locked" on the site's vote list).
+  const isLockedVote = (v) => !!(v && (v.is_locked === true || v.locked === true || /lock/i.test(String(v.vote_type || v.type || v.vote || '')) || Number(v.score) === 0));
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
   const normBody = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -309,11 +310,23 @@
   }
 
   function analyzeVotes(votes, postMap, entries) {
-    const A = { up: 0, down: 0, other: 0, missing: 0, byUploader: {}, names: {}, delaysDown: [], delaysUp: [],
+    const A = { up: 0, down: 0, other: 0, locked: 0, lockedPosts: [], missing: 0, byUploader: {}, names: {}, delaysDown: [], delaysUp: [],
       blDown: [], blUp: 0, blHits: {}, downChecked: 0, tagUp: {}, tagDown: {}, timesAll: [], timesDown: [] };
     for (const v of votes) {
       const dir = v.score > 0 ? 'up' : v.score < 0 ? 'down' : null;
-      if (!dir) { A.other++; continue; }
+      const locked = isLockedVote(v);
+      if (!dir && !locked) { A.other++; continue; }
+      if (locked) A.locked++;
+      if (!dir) {   // a locked vote has no direction: counted on its own, per uploader
+        const lp = postMap.get(v.post_id);
+        if (!lp) { A.missing++; continue; }
+        const lu = (A.byUploader[lp.uploader_id] = A.byUploader[lp.uploader_id] || { up: 0, down: 0, upPosts: [], downPosts: [] });
+        lu.locked = (lu.locked || 0) + 1;
+        (lu.lockedPosts = lu.lockedPosts || []).push(lp.id);
+        A.lockedPosts.push(lp.id);
+        if (lp.uploader_name) A.names[lp.uploader_id] = lp.uploader_name;
+        continue;
+      }
       A[dir]++;
       const t = Date.parse(v.created_at);
       A.timesAll.push(t);
@@ -324,6 +337,7 @@
       const u = (A.byUploader[p.uploader_id] = A.byUploader[p.uploader_id] || { up: 0, down: 0, upPosts: [], downPosts: [] });
       u[dir]++;
       u[dir + 'Posts'].push(p.id);
+      if (locked) { u.locked = (u.locked || 0) + 1; (u.lockedPosts = u.lockedPosts || []).push(p.id); A.lockedPosts.push(p.id); }
       if (p.uploader_name) A.names[p.uploader_id] = p.uploader_name;
       (dir === 'down' ? A.delaysDown : A.delaysUp).push((t - Date.parse(p.created_at)) / 3.6e6);
       const m = entries.length ? blacklistMatch(entries, p) : null;
@@ -983,8 +997,8 @@
 
   function secVotes() {
     if (state.votes.error) return section('Votes on posts', `<div>${esc(state.votes.error)}</div>`, true);
-    const A = state.votes.A, tot = A.up + A.down;
-    if (!tot) return section('Votes on posts', '<div class="hint">No votes in this timespan.</div>');
+    const A = state.votes.A, tot = A.up + A.down, lockedN = A.locked || 0;
+    if (!tot && !lockedN) return section('Votes on posts', '<div class="hint">No votes in this timespan.</div>');
     const med = (arr) => (arr.length ? median(arr).toFixed(1) + ' h' : 'n/a');
     const quick = A.delaysDown.filter((h) => h <= 1).length;
     const downRows = uploaderRows(A, 'down'), upRows = uploaderRows(A, 'up');
@@ -992,7 +1006,7 @@
     const body = table(['Measure', 'Value'], [
       ['Votes analysed', `${tot} (${upN(A.up)} / ${downN(A.down)})`],
       ['Downvote share', pct(A.down, tot) + '%'],
-      ['Votes on posts that could not be loaded', A.missing],
+      ['Locked votes', lockedN ? drill(esc(lockedN), A.lockedPosts || [], postLink) : 0],
       ['Most votes within one hour', maxInWindow(A.timesAll, 3600000)],
       ['Median time from upload to vote (down / up)', `${med(A.delaysDown)} / ${med(A.delaysUp)}`],
       ['Downvotes within 1 hour of upload', `${quick} (${pct(quick, A.delaysDown.length)}%)`],
@@ -1000,7 +1014,10 @@
       viewToggle('Votes on posts', 'Uploaders they downvote most', 'Uploaders they upvote most') +
       (viewOf('Votes on posts') === 'down'
         ? (downRows.length ? table(['Uploader', 'Up', 'Down', 'Net', 'Share of downvotes'], downRows) : empty)
-        : (upRows.length ? table(['Uploader', 'Up', 'Down', 'Net', 'Share of upvotes'], upRows) : empty));
+        : (upRows.length ? table(['Uploader', 'Up', 'Down', 'Net', 'Share of upvotes'], upRows) : empty)) +
+      (lockedN ? '<b>Uploaders with locked votes</b>' + table(['Uploader', 'Locked', 'Share of locked'],
+        Object.entries(A.byUploader).filter(([, v]) => v.locked > 0).sort((a, b) => b[1].locked - a[1].locked).slice(0, 10)
+          .map(([id, v]) => [userLink(id, A.names[id]), drill(esc(v.locked), v.lockedPosts, postLink), pct(v.locked, lockedN) + '%'])) : '');
     return section('Votes on posts', body, true);
   }
 
@@ -1096,7 +1113,7 @@
     const C = state.cvotes;
     if (!C) return '';
     if (C.error) return section('Votes on comments', `<div>${esc(C.error)}</div>`);
-    if (!C.up && !C.down) return section('Votes on comments', '<div class="hint">No comment votes in this timespan.</div>');
+    if (!C.up && !C.down && !C.locked) return section('Votes on comments', '<div class="hint">No comment votes in this timespan.</div>');
     const rowsFor = (key) => Object.values(C.byAuthor).filter((v) => v[key] > 0)
       .sort((a, b) => b[key] - a[key] || (b.up + b.down) - (a.up + a.down)).slice(0, 10)
       .map((v) => [v.id !== undefined ? userLink(v.id, v.name) : esc(v.name), drill(upN(v.up), v.upItems, commentLink),
@@ -1105,7 +1122,7 @@
     return section('Votes on comments', table(['Measure', 'Value'], [
       ['Votes analysed', `${C.up + C.down} (${upN(C.up)} / ${downN(C.down)})`],
       ['Downvote share', pct(C.down, C.up + C.down) + '%'],
-      ['Comments that could not be loaded', C.missing],
+      ['Locked votes', C.locked || 0],
     ]) + '<div class="hint">Click an Up or Down number to list the comments.</div>' +
       viewToggle('Votes on comments', 'Commenters they downvote most', 'Commenters they upvote most') +
       (viewOf('Votes on comments') === 'down'
@@ -1336,6 +1353,7 @@
       (chunk) => `/posts.json?tags=${encodeURIComponent(`id:${chunk.join(',')} status:any`)}&limit=100`,
       (p) => p.id, 'voted posts', lane, 'votedPosts');
     state.votes = { A: analyzeVotes(votes, postMap, state.blacklist.entries) };
+    if (state.votes.A.missing) log(`${state.votes.A.missing} votes on posts could not be matched to their post, so they are left out of the uploader, timing and blacklist figures.`);
     render();
 
     if (stopFlag) return;
@@ -1356,9 +1374,10 @@
       const cmap = await fetchByIds(cids,
         (chunk) => `/comments.json?group_by=comment&search[id]=${chunk.join(',')}&limit=100`,
         (c) => c.id, 'voted comments', lane, 'votedComments');
-      const C = { up: 0, down: 0, missing: 0, byAuthor: {} };
+      const C = { up: 0, down: 0, locked: 0, missing: 0, byAuthor: {} };
       for (const v of cv) {
         const dir = v.score > 0 ? 'up' : v.score < 0 ? 'down' : null;
+        if (isLockedVote(v)) C.locked++;
         if (!dir) continue;
         C[dir]++;
         const c = cmap.get(v.comment_id);
@@ -1368,6 +1387,7 @@
         a[dir]++;
         a[dir + 'Items'].push({ id: c.id, post_id: c.post_id });
       }
+      if (C.missing) log(`${C.missing} votes on comments could not be matched to their comment, so they are left out of the commenter table.`);
       state.cvotes = C;
     } catch (e) {
       state.cvotes = { error: e.status === 403 || e.status === 401 || e.status === 404
