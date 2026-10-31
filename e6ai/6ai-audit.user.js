@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.34
+// @version      1.35
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -2016,7 +2016,8 @@
   function coverageHtml() {
     const o = state.opts || {};
     const n = (x) => Number(x || 0).toLocaleString('en-US');
-    const span = o.from || o.to ? `${o.from ? day(o.from) : 'the start'} → ${o.to ? day(o.to) : 'now'}` : 'all time';
+    const end = o.to ? day(o.to) : day(o.ts || Date.now());   // an empty "To" means up to the day the audit was run
+    const span = o.from ? `${day(o.from)} → ${end}` : `everything up to ${end}`;
     const hitC = o.maxC && comments.length >= o.maxC;
     const vs = [state.votes && state.votes.A, state.cvotes && !state.cvotes.error ? state.cvotes : null,
       state.recvPosts && state.recvPosts.capHit ? { capHit: true } : null, state.recvComments && state.recvComments.capHit ? { capHit: true } : null];
