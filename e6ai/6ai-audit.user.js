@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.33
+// @version      1.34
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -434,6 +434,10 @@
     #ua-panel .ua-savedbar .hint { flex-basis: 100%; }
     #ua-panel .ua-info { flex-basis: 100%; padding: 7px 10px; border-radius: 4px; background: #3a3320; border: 1px solid var(--ua-accent); color: var(--ua-text); font-size: 12px; line-height: 1.4; }
     #ua-panel .ua-info b { color: var(--ua-accent); }
+    #ua-panel .ua-cov { flex-basis: 100%; font-size: 12px; line-height: 1.5; padding: 2px 4px 0; color: var(--ua-text); }
+    #ua-panel .ua-cov div { margin: 1px 0; }
+    #ua-panel .ua-cov .k { opacity: .7; }
+    #ua-panel .ua-cov .cap { color: var(--ua-neg); font-weight: bold; }
     #ua-panel #ua-stamp, #ua-panel .ua-savedbar, #ua-panel .ua-info { max-width: none !important; width: auto !important; box-sizing: border-box; }   /* the site styles .hint boxes with a width limit; these boxes must follow the window */
     #ua-panel .hint { font-size: 11px; color: var(--ua-muted); }
     #ua-panel a { color: var(--ua-link); text-decoration: none; }
@@ -1403,6 +1407,7 @@
       (chunk) => `/posts.json?tags=${encodeURIComponent(`id:${chunk.join(',')} status:any`)}&limit=100`,
       (p) => p.id, 'voted posts', lane, 'votedPosts');
     state.votes = { A: analyzeVotes(votes, postMap, state.blacklist.entries) };
+    state.votes.A.loaded = votes.length;   // shown in the saved-audit coverage line
     if (state.votes.A.missing) log(`${state.votes.A.missing} votes on posts could not be matched to their post, so they are left out of the uploader, timing and blacklist figures.`);
     render();
 
@@ -1424,7 +1429,7 @@
       const cmap = await fetchByIds(cids,
         (chunk) => `/comments.json?group_by=comment&search[id]=${chunk.join(',')}&limit=100`,
         (c) => c.id, 'voted comments', lane, 'votedComments');
-      const C = { up: 0, down: 0, locked: 0, missing: 0, byAuthor: {} };
+      const C = { up: 0, down: 0, locked: 0, missing: 0, loaded: cv.length, byAuthor: {} };
       for (const v of cv) {
         const dir = v.score > 0 ? 'up' : v.score < 0 ? 'down' : null;
         if (isLockedVote(v)) C.locked++;
@@ -1491,7 +1496,7 @@
       if (!full && !stopFlag) await flush();
       progressSet(task, 1);
       const limited = full ? ' (stopped at the Max votes limit, so older ones may be missing)' : scanned >= SCAN_CAP ? ' (scan limit reached, older ones are not included)' : '';
-      return { A: analyzeReceived(votes, idKey), note: `Covers votes on their ${scanned} most recent ${what}${limited}.` };
+      return { A: analyzeReceived(votes, idKey), loaded: votes.length, capHit: full, scanned, note: `Covers votes on their ${scanned} most recent ${what}${limited}.` };
     }
 
     try {
@@ -2007,6 +2012,19 @@
     } catch { /* ignore */ }
   }
 
+  // What the audit on screen actually covers: timespan, which parts were run, how much was loaded, and whether a Max limit cut it off.
+  function coverageHtml() {
+    const o = state.opts || {};
+    const n = (x) => Number(x || 0).toLocaleString('en-US');
+    const span = o.from || o.to ? `${o.from ? day(o.from) : 'the start'} → ${o.to ? day(o.to) : 'now'}` : 'all time';
+    const hitC = o.maxC && comments.length >= o.maxC;
+    const vs = [state.votes && state.votes.A, state.cvotes && !state.cvotes.error ? state.cvotes : null,
+      state.recvPosts && state.recvPosts.capHit ? { capHit: true } : null, state.recvComments && state.recvComments.capHit ? { capHit: true } : null];
+    const hitV = o.maxV && vs.some((V) => V && (V.capHit || (V.loaded !== undefined && V.loaded >= o.maxV)));
+    const cap = (hit) => (hit ? ' <span class="cap">(limit reached)</span>' : '');
+    return `<div class="ua-cov"><span class="k">Timespan:</span> ${esc(span)} · <span class="k">Max comments:</span> ${n(o.maxC)}${cap(hitC)} · <span class="k">Max votes:</span> ${n(o.maxV)}${cap(hitV)}</div>`;
+  }
+
   function showStamp(ts, cached) {
     const d = new Date(ts), z = (n) => String(n).padStart(2, '0');
     const when = `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`;
@@ -2015,16 +2033,19 @@
     const box = $('ua-stamp');
     const other = cached && profileId !== pageId;   // a saved audit of someone other than this page's profile (or any saved audit when off a profile)
     const nm = esc((state.user && state.user.name) || 'user #' + profileId);
+    const cov = coverageHtml();
     box.innerHTML = other
       ? `<div class="ua-savedbar">` +
         (onProfile ? `<div class="ua-warn">⚠ You are looking at the saved audit of <b>${userLink(profileId, (state.user && state.user.name) || null)}</b> (#${esc(profileId)}), <b>not</b> the profile you are on (<b>${userLink(pageId, pageName)}</b>, #${esc(pageId)}). Running audits is disabled while this is open.</div>` : '') +
         `<button id="ua-clear-saved" class="ua-clear" title="Delete only this saved audit (${nm}). The other saved audits are kept.">🗑 Delete this audit</button>` +
-        `<span class="hint">Saved audit from ${when} (${ago}).${onProfile ? '' : ' Open the user\'s profile to run a fresh audit.'}</span></div>`
+        `<span class="hint">Saved audit from ${when} (${ago}).${onProfile ? '' : ' Open the user\'s profile to run a fresh audit.'}</span>${cov}</div>`
       : cached
-      ? `<div class="ua-savedbar"><div class="ua-info">🕘 <b>Saved audit</b> from ${when} (${ago}). Press Run audit for fresh data.</div>` +
-        `<button id="ua-clear-saved" class="ua-clear" title="Delete this saved audit. Other users' saved audits are kept.">🗑 Delete this audit</button></div>`
-      : `<div class="ua-savedbar"><div class="ua-info">✔ <b>Audited</b> ${when}. Saved for later.</div>` +
-        `<button id="ua-clear-saved" class="ua-clear" title="Delete this saved audit. Other users' saved audits are kept.">🗑 Delete this audit</button></div>`;
+      ? `<div class="ua-savedbar"><div class="ua-info">🕘 <b>Saved audit</b> Press Run audit for fresh data.</div>` +
+        `<button id="ua-clear-saved" class="ua-clear" title="Delete this saved audit. Other users' saved audits are kept.">🗑 Delete this audit</button>` +
+        `<span class="hint">From ${when} (${ago}).</span>${cov}</div>`
+      : `<div class="ua-savedbar"><div class="ua-info">✔ <b>Audited</b> Saved for later.</div>` +
+        `<button id="ua-clear-saved" class="ua-clear" title="Delete this saved audit. Other users' saved audits are kept.">🗑 Delete this audit</button>` +
+        `<span class="hint">From ${when} (${ago}).</span>${cov}</div>`;
     box.style.display = '';
     renderTabs();
   }
