@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         e6AI User Audit
 // @namespace    e6ai-admin-tools
-// @version      1.32
+// @version      1.33
 // @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -23,6 +23,7 @@
   const RECEIVED_SCAN_CAP = 1000;  // most of their own posts, and of their own comments, checked for votes they received (was 3000)
   const VOTER_ROWS = 10;   // voters shown per table; names are looked up for exactly these
   let stopFlag = false;
+  let auditRunning = false;
   let comments = [];       // loaded comments, used by the sample view
   let state = {};          // results of the current audit
   let userInfo = new Map();  // voter id -> user JSON (names, account age)
@@ -367,10 +368,12 @@
   }
   // ---- pure helpers end ----
 
-  // Only active on a user's profile page (/users/<id>); the audited user is that profile.
+  // On a user's profile page (/users/<id>) the audited user is that profile. On any other page the window only lists and opens saved audits.
   const profileMatch = location.pathname.match(/^\/users\/(\d+)\/?$/);
-  if (!profileMatch) return;
-  const profileId = profileMatch[1];
+  const onProfile = !!profileMatch;
+  const pageId = onProfile ? profileMatch[1] : null;     // the profile this page belongs to (null on other pages)
+  let pageName = null;                                   // name of this page's profile, once known
+  let profileId = pageId;                                // the user whose audit is shown / targeted; differs from pageId while a saved audit of someone else is open
 
   GM_addStyle(`
     /* Colours taken from the site's "Bloodlust" theme */
@@ -392,6 +395,46 @@
       border: 1px solid var(--ua-section-light); border-radius: 4px; }
     #ua-panel button:hover { background: var(--ua-background); color: var(--ua-hover); }
     #ua-panel .row { margin-top: 8px; }
+    #ua-panel.ua-off .ua-ctl { display: none !important; }
+    #ua-panel.ua-off #ua-log:empty, #ua-panel.ua-off #ua-bar, #ua-panel.ua-off #ua-status:empty { display: none !important; }
+    #ua-panel #ua-saved { padding-top: 14px; }
+    #ua-panel #ua-log:empty { display: none; }
+    #ua-panel .ua-badge { margin-left: 8px; padding: 1px 7px; border-radius: 3px; background: var(--ua-neg); color: #000; font-size: 10px; font-weight: bold; letter-spacing: .04em; vertical-align: middle; }
+    #ua-panel #ua-tabs { position: sticky; top: calc(var(--ua-head-h, 38px) - 13px); z-index: 1; display: flex; flex-wrap: wrap; gap: 4px; margin: -6px -12px 10px; padding: 8px 12px 0;
+      background: var(--ua-section); border-bottom: 1px solid var(--ua-section-light); }
+    #ua-panel button.ua-tab { display: flex; flex-direction: column; align-items: flex-start; margin: 0 0 -1px; padding: 6px 14px 5px; text-align: left; line-height: 1.25;
+      border-radius: 6px 6px 0 0; border-bottom-color: var(--ua-section-light); background: var(--ua-foreground); color: var(--ua-muted); }
+    #ua-panel button.ua-tab .t1 { font-size: 13px; font-weight: bold; color: var(--ua-link); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #ua-panel button.ua-tab .t2 { font-size: 10px; color: var(--ua-muted); }
+    #ua-panel button.ua-tab.ua-tab-on { background: var(--ua-section); border-color: var(--ua-section-light); border-top: 2px solid var(--ua-accent); border-bottom-color: var(--ua-section); cursor: default; }
+    #ua-panel button.ua-tab.ua-tab-on .t1 { color: var(--ua-text); }
+    #ua-panel button.ua-tab.ua-tab-other.ua-tab-on { background: #5a1a1a; border-top-color: var(--ua-neg); border-bottom-color: #5a1a1a; }
+    #ua-panel button.ua-tab.ua-tab-other .t2 { color: #ffb0b0; }
+    #ua-panel .ua-saved-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 6px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--ua-section-light); }
+    #ua-panel .ua-saved-head b { color: var(--ua-accent); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+    #ua-panel .ua-cardrow { display: flex; gap: 6px; align-items: stretch; margin-bottom: 6px; }
+    #ua-panel .ua-cardrow a.ua-card { flex: 1; margin-bottom: 0; min-width: 0; }
+    #ua-panel .ua-cardrow button.ua-del { margin: 0; padding: 0 14px; min-width: 46px; font-size: 15px; color: var(--ua-neg); }
+    #ua-panel .ua-cardrow button.ua-del.ua-armed { background: #5a1a1a; border-color: var(--ua-neg); color: #fff; font-size: 12px; font-weight: bold; }
+    #ua-panel a.ua-card { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 6px; background: var(--ua-foreground);
+      border: 1px solid var(--ua-section-light); border-radius: 6px; text-decoration: none !important; }
+    #ua-panel a.ua-card:hover { background: var(--ua-background); border-color: var(--ua-hover); }
+    #ua-panel a.ua-card .nm { font-size: 14px; font-weight: bold; }
+    #ua-panel a.ua-card .id { font-size: 11px; color: var(--ua-muted); }
+    #ua-panel a.ua-card .when { margin-left: auto; text-align: right; font-size: 11px; line-height: 1.35; color: var(--ua-muted); }
+    #ua-panel a.ua-card .when b { display: block; color: var(--ua-text); font-weight: normal; }
+    #ua-panel a.ua-card .go { color: var(--ua-accent); font-size: 18px; line-height: 1; }
+    #ua-panel.ua-other { border-color: var(--ua-neg); box-shadow: 0 0 0 2px var(--ua-neg), 0 4px 20px rgba(0,0,0,.7); }
+    #ua-panel .ua-warn { flex-basis: 100%; padding: 7px 10px; border-radius: 4px; background: #5a1a1a; border: 1px solid var(--ua-neg); color: #fff; font-size: 12px; line-height: 1.4; }
+    #ua-panel .ua-warn b { color: var(--ua-link); }
+    #ua-panel .ua-savedbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 8px; padding: 8px 10px; background: var(--ua-foreground); border: 1px solid var(--ua-section-light); border-radius: 6px; }
+    #ua-panel .ua-savedbar button { margin: 0; }
+    #ua-panel .ua-savedbar .ua-back { font-weight: bold; }
+    #ua-panel .ua-savedbar .ua-clear { color: var(--ua-neg); }
+    #ua-panel .ua-savedbar .hint { flex-basis: 100%; }
+    #ua-panel .ua-info { flex-basis: 100%; padding: 7px 10px; border-radius: 4px; background: #3a3320; border: 1px solid var(--ua-accent); color: var(--ua-text); font-size: 12px; line-height: 1.4; }
+    #ua-panel .ua-info b { color: var(--ua-accent); }
+    #ua-panel #ua-stamp, #ua-panel .ua-savedbar, #ua-panel .ua-info { max-width: none !important; width: auto !important; box-sizing: border-box; }   /* the site styles .hint boxes with a width limit; these boxes must follow the window */
     #ua-panel .hint { font-size: 11px; color: var(--ua-muted); }
     #ua-panel a { color: var(--ua-link); text-decoration: none; }
     #ua-panel a:hover { color: var(--ua-hover); text-decoration: underline; }
@@ -425,7 +468,7 @@
     #ua-panel tr details.ua-x > .ua-links { display: none; }
     #ua-panel tr.ua-xrow td { padding: 3px 6px 6px 18px; background: var(--ua-foreground); }
     #ua-panel tr.ua-xrow .ua-links { max-width: none; max-height: 140px; }
-    #ua-head { position: sticky; top: 0; z-index: 2; margin: -12px -12px 6px; padding: 8px 12px; background: var(--ua-background);
+    #ua-head { position: sticky; top: -12px; z-index: 2; margin: -12px -12px 6px; padding: 8px 12px; background: var(--ua-background);
       border-bottom: 1px solid var(--ua-section-light); cursor: move; user-select: none; touch-action: none; border-radius: 8px 8px 0 0; }
     #ua-head #ua-close { float: right; margin: 0; padding: 0 7px; cursor: pointer; }
     #ua-status { margin-top: 8px; font-weight: bold; font-size: 12px; color: var(--ua-accent); }
@@ -453,30 +496,32 @@
   const panel = document.createElement('div');
   panel.id = 'ua-panel';
   panel.innerHTML = `
-    <div id="ua-head"><button id="ua-close" title="Close">✕</button><b>User Audit</b> <span id="ua-name">— user #${profileId}</span> <span class="hint">(drag to move)</span></div>
-    <div class="row">
+    <div id="ua-head"><button id="ua-close" title="Close">✕</button><b>User Audit</b> <span id="ua-name">${onProfile ? '— user #' + profileId : '— saved audits'}</span><span id="ua-badge" class="ua-badge" style="display:none">SAVED COPY</span> <span class="hint">(drag to move)</span></div>
+    <div id="ua-tabs"></div>
+    <div class="row ua-ctl">
       <label>From <input type="date" id="ua-from"></label>
       <label>To <input type="date" id="ua-to"></label>
       <button id="ua-7">7d</button><button id="ua-30">30d</button><button id="ua-90">90d</button><button id="ua-all">All</button>
       <div class="hint">Timespan applies to comments and votes. Uploads are always the whole account. Max votes applies to each vote list separately.</div>
     </div>
-    <div class="row">
+    <div class="row ua-ctl">
       <label><input type="checkbox" id="ua-do-posts" checked> Uploads</label>
       <label><input type="checkbox" id="ua-do-comments" checked> Comments</label>
       <label><input type="checkbox" id="ua-do-votes" checked> Votes cast</label>
       <label><input type="checkbox" id="ua-do-received" checked> Votes received</label>
     </div>
-    <div class="row">
+    <div class="row ua-ctl">
       <label>Max comments <input type="number" id="ua-max-comments" value="1000" min="10" style="width:70px"></label>
       <label>Max votes <input type="number" id="ua-max-votes" value="2000" min="10" style="width:70px"></label>
     </div>
-    <div>
+    <div class="ua-ctl">
       <button id="ua-run">Run audit</button>
       <button id="ua-quick" title="Uploads and comments only: no votes and no replacement scan. Not saved, so your last full audit is kept.">Quick audit</button>
       <button id="ua-stop">Stop</button>
     </div>
     <div id="ua-status"></div>
     <div id="ua-bar"><div id="ua-bar-fill"></div><span id="ua-bar-text"></span></div>
+    <div id="ua-saved" style="display:none"></div>
     <div id="ua-stamp" class="hint" style="display:none"></div>
     <div id="ua-log"></div>
     <div id="ua-report"></div>
@@ -499,6 +544,7 @@
       <div id="ua-comments"><span class="hint">Run an audit with Comments ticked to load them.</span></div>
     </details>
   `;
+  panel.classList.toggle('ua-off', !onProfile);
   const toggle = document.createElement('button');
   toggle.id = 'ua-toggle';
   toggle.textContent = 'User Audit';
@@ -508,7 +554,8 @@
     if (panel.style.display === 'block') return closePanel();
     panel.style.display = 'block';
     placePanel();
-    if (!state.user) setStatus('Ready. Set the options you want, then press "Run audit".');
+    if (!onProfile) { if (!state.user) showSavedList(); }
+    else if (!state.user) { setStatus('Ready. Set the options you want, then press "Run audit".'); fillOwnName(); }
   };
   document.body.append(panel, toggle);
 
@@ -1186,6 +1233,7 @@
     panel.appendChild($('ua-sample'));   // the comment sample sits inside the report, so move it out before the report is cleared
     $('ua-report').innerHTML = '';
     stopFlag = false;
+    auditRunning = true;
     DELAY = DELAY_FAST;
     slots = {};
     pauseUntil = 0;
@@ -1210,6 +1258,7 @@
       const user = await getJSON(`/users/${profileId}.json`);
       if (!user || !user.id) return log('Could not load this user.');
       $('ua-name').textContent = '— ' + user.name;
+      pageName = user.name;
       state.user = user;
 
       let blText = typeof user.blacklisted_tags === 'string' ? user.blacklisted_tags : '', blSource = 'profile', blError = null;
@@ -1279,6 +1328,7 @@
     } catch (e) {
       log('Error: ' + e.message);
     } finally {
+      auditRunning = false;
       setStatus(stopFlag ? 'Stopped.' : 'Done.');
       render();
       logRunSummary();
@@ -1914,6 +1964,7 @@
   const cacheKey = (id) => 'ua_cache_' + id;
   const toJSON = (v) => JSON.stringify(v, (k, x) => x instanceof Map ? { __t: 'Map', v: [...x] } : x instanceof Set ? { __t: 'Set', v: [...x] } : x);
   const fromJSON = (t) => JSON.parse(t, (k, x) => x && x.__t === 'Map' ? new Map(x.v) : x && x.__t === 'Set' ? new Set(x.v) : x);
+  const readNames = () => { try { return JSON.parse(GM_getValue('ua_cache_names', '{}')) || {}; } catch { return {}; } };   // id -> user name, so the list needs no big reads
   const readIndex = () => { try { return JSON.parse(GM_getValue('ua_cache_index', '{}')) || {}; } catch { return {}; } };
 
   function saveCache(opts) {
@@ -1927,13 +1978,17 @@
         if (i >= CACHE_MAX_USERS || ts - idx[id] > CACHE_MAX_AGE) { GM_deleteValue(cacheKey(id)); delete idx[id]; }
       });
       GM_setValue('ua_cache_index', JSON.stringify(idx));
+      const nm = readNames();
+      if (state.user) nm[profileId] = state.user.name;
+      Object.keys(nm).forEach((id) => { if (!(id in idx)) delete nm[id]; });
+      GM_setValue('ua_cache_names', JSON.stringify(nm));
     } catch (e) { log('Could not save this audit: ' + e.message); }
     return ts;
   }
 
-  function loadCache() {
+  function loadCache(id = profileId) {
     try {
-      const raw = GM_getValue(cacheKey(profileId), null);
+      const raw = GM_getValue(cacheKey(id), null);
       if (!raw) return null;
       const c = fromJSON(raw);
       if (!c || !c.state || !c.state.user || Date.now() - c.ts > CACHE_MAX_AGE) return null;
@@ -1941,12 +1996,14 @@
     } catch { return null; }
   }
 
-  function clearCache() {
+  function clearCache(id = profileId) {
     try {
-      GM_deleteValue(cacheKey(profileId));
+      GM_deleteValue(cacheKey(id));
       const idx = readIndex();
-      delete idx[profileId];
+      delete idx[id];
       GM_setValue('ua_cache_index', JSON.stringify(idx));
+      const nm = readNames();
+      if (id in nm) { delete nm[id]; GM_setValue('ua_cache_names', JSON.stringify(nm)); }
     } catch { /* ignore */ }
   }
 
@@ -1956,17 +2013,143 @@
     const mins = Math.max(0, Math.round((Date.now() - ts) / 6e4));
     const ago = mins < 2 ? 'just now' : mins < 90 ? `${mins} min ago` : mins < 2880 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} days ago`;
     const box = $('ua-stamp');
-    box.innerHTML = cached
-      ? `Saved audit from ${when} (${ago}). Press Run audit for fresh data. <a href="#" id="ua-clear-saved">Clear saved</a>`
-      : `Audited ${when}. <a href="#" id="ua-clear-saved">Clear saved</a>`;
+    const other = cached && profileId !== pageId;   // a saved audit of someone other than this page's profile (or any saved audit when off a profile)
+    const nm = esc((state.user && state.user.name) || 'user #' + profileId);
+    box.innerHTML = other
+      ? `<div class="ua-savedbar">` +
+        (onProfile ? `<div class="ua-warn">⚠ You are looking at the saved audit of <b>${userLink(profileId, (state.user && state.user.name) || null)}</b> (#${esc(profileId)}), <b>not</b> the profile you are on (<b>${userLink(pageId, pageName)}</b>, #${esc(pageId)}). Running audits is disabled while this is open.</div>` : '') +
+        `<button id="ua-clear-saved" class="ua-clear" title="Delete only this saved audit (${nm}). The other saved audits are kept.">🗑 Delete this audit</button>` +
+        `<span class="hint">Saved audit from ${when} (${ago}).${onProfile ? '' : ' Open the user\'s profile to run a fresh audit.'}</span></div>`
+      : cached
+      ? `<div class="ua-savedbar"><div class="ua-info">🕘 <b>Saved audit</b> from ${when} (${ago}). Press Run audit for fresh data.</div>` +
+        `<button id="ua-clear-saved" class="ua-clear" title="Delete this saved audit. Other users' saved audits are kept.">🗑 Delete this audit</button></div>`
+      : `<div class="ua-savedbar"><div class="ua-info">✔ <b>Audited</b> ${when}. Saved for later.</div>` +
+        `<button id="ua-clear-saved" class="ua-clear" title="Delete this saved audit. Other users' saved audits are kept.">🗑 Delete this audit</button></div>`;
     box.style.display = '';
+    renderTabs();
   }
 
   $('ua-stamp').addEventListener('click', (e) => {
+    if (e.target.closest && e.target.closest('#ua-own')) { e.preventDefault(); showOwn(); return; }
+    if (e.target.closest && e.target.closest('#ua-back-saved')) { e.preventDefault(); backToSaved(); return; }
     if (!(e.target.closest && e.target.closest('#ua-clear-saved'))) return;
     e.preventDefault();
     clearCache();
     $('ua-stamp').style.display = 'none';
+    if (profileId !== pageId) backToSaved();
+  });
+
+  // ---------- saved audits list (shown when the window is opened away from a profile page) ----------
+  function showSavedList() {
+    const box = $('ua-saved'), idx = readIndex(), names = readNames();
+    const ids = Object.keys(idx).filter((id) => Date.now() - idx[id] <= CACHE_MAX_AGE).sort((a, b) => idx[b] - idx[a]);
+    let added = false;
+    for (const id of ids) if (!names[id]) { const c = loadCache(id); if (c) { names[id] = c.state.user.name; added = true; } }   // audits saved before names were stored
+    if (added) { try { GM_setValue('ua_cache_names', JSON.stringify(names)); } catch { /* ignore */ } }
+    const ownBtn = onProfile ? '<div class="hint" style="margin-bottom:8px">Opening a saved audit shows that user\'s data, not this profile\'s. Use the first tab to return to this profile.</div>' : '';
+    const agoOf = (ts) => { const m = Math.max(0, Math.round((Date.now() - ts) / 6e4)); return m < 2 ? 'just now' : m < 90 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`; };
+    box.innerHTML = ids.length
+      ? `<div class="ua-saved-head"><b>Saved audits (${ids.length})</b><span class="hint">Newest ${CACHE_MAX_USERS} kept, up to 30 days</span></div>` + ownBtn +
+        ids.map((id) => `<div class="ua-cardrow"><a href="#" class="ua-card" data-saved="${esc(id)}"><span><span class="nm">${esc(names[id] || 'user #' + id)}</span> <span class="id">#${esc(id)}</span></span>` +
+          `<span class="when"><b>${esc(fmtDT(idx[id]))}</b>${esc(agoOf(idx[id]))}</span><span class="go">›</span></a><button class="ua-del" data-del="${esc(id)}" title="Delete the saved audit of ${esc(names[id] || 'user #' + id)}">🗑</button></div>`).join('')
+      : '<div class="ua-saved-head"><b>Saved audits</b></div>' + ownBtn + '<div class="hint">No saved audits yet. Run an audit on a user profile and it is saved here.</div>';
+    box.style.display = '';
+    setStatus('');
+    renderTabs();
+  }
+  function backToSaved() {
+    state = {}; comments = []; userInfo = new Map(); lookupFailed.clear();
+    profileId = null; syncMode();
+    renderComments(); render();
+    $('ua-stamp').style.display = 'none';
+    $('ua-name').textContent = '— saved audits';
+    showSavedList();
+  }
+  // Panel look: controls are only usable when the shown audit belongs to this page's profile; a red frame marks someone else's audit on a profile page.
+  function syncMode() {
+    panel.classList.toggle('ua-off', !onProfile || profileId !== pageId);
+    const other = onProfile && profileId !== null && profileId !== pageId;
+    panel.classList.toggle('ua-other', other);
+    $('ua-badge').style.display = other ? '' : 'none';
+    renderTabs();
+  }
+  // The tabs: this profile (only on a profile page) | all saved audits | the saved audit of someone else that is open now.
+  function renderTabs() {
+    const idx = readIndex(), n = Object.keys(idx).filter((id) => Date.now() - idx[id] <= CACHE_MAX_AGE).length;
+    const mode = profileId === null ? 'list' : (onProfile && profileId === pageId ? 'own' : 'view');
+    let h = '';
+    if (onProfile) h += `<button class="ua-tab${mode === 'own' ? ' ua-tab-on' : ''}" data-tab="own"><span class="t1">${esc(pageName || 'user #' + pageId)}</span><span class="t2">this profile</span></button>`;
+    h += `<button class="ua-tab${mode === 'list' ? ' ua-tab-on' : ''}" data-tab="list"><span class="t1">Saved audits (${n})</span><span class="t2">${onProfile ? 'all users' : 'open one to view it'}</span></button>`;
+    if (mode === 'view') h += `<button class="ua-tab ua-tab-on ua-tab-other" data-tab="view"><span class="t1">${esc((state.user && state.user.name) || (readNames()[profileId]) || 'user #' + profileId)}</span><span class="t2">saved audit</span></button>`;
+    $('ua-tabs').innerHTML = h;
+  }
+  // the tabs stay put under the title bar while the report scrolls; they need to know how tall the title bar is
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => panel.style.setProperty('--ua-head-h', head.getBoundingClientRect().height + 'px')).observe(head);
+  $('ua-tabs').addEventListener('click', (e) => {
+    const t = e.target.closest && e.target.closest('button[data-tab]');
+    if (!t) return;
+    if (t.dataset.tab === 'own') { if (profileId !== pageId) showOwn(); return; }
+    if (t.dataset.tab === 'list') {
+      if (auditRunning) return setStatus('An audit is running. Wait for it to finish, or press Stop, before opening the list.');
+      backToSaved();
+    }
+  });
+  // Back to this page's own profile: show its saved audit if there is one.
+  function showOwn() {
+    if (!onProfile || profileId === pageId) return;
+    state = {}; comments = []; userInfo = new Map(); lookupFailed.clear();
+    profileId = pageId; syncMode();
+    $('ua-saved').style.display = 'none';
+    $('ua-stamp').style.display = 'none';
+    $('ua-name').textContent = '— ' + (pageName || 'user #' + pageId);
+    const c = loadCache(pageId);
+    if (c) {
+      state = c.state;
+      if (!state.opts && c.opts) state.opts = Object.assign({}, c.opts, { ts: c.ts });
+      comments = c.comments || [];
+      userInfo = c.userInfo instanceof Map ? c.userInfo : new Map();
+      if (c.lookupFailed instanceof Set) c.lookupFailed.forEach((x) => lookupFailed.add(x));
+      $('ua-name').textContent = '— ' + state.user.name;
+      pageName = state.user.name;
+    }
+    renderTabs();
+    try { renderComments(); render(); if (c) showStamp(c.ts, true); } catch (err) { log('Could not show the saved audit (' + err.message + ').'); }
+    if (!c) { setStatus('Ready. Set the options you want, then press "Run audit".'); fillOwnName(); }
+  }
+  // The title shows "user #id" until the name is known: from a saved audit or the names list, otherwise one lookup of this profile.
+  async function fillOwnName() {
+    if (!onProfile || !/^— user #/.test($('ua-name').textContent)) return;
+    const put = (n) => { if (n && profileId === pageId && /^— user #/.test($('ua-name').textContent)) { $('ua-name').textContent = '— ' + n; pageName = n; renderTabs(); } };
+    put(readNames()[pageId]);
+    if (!/^— user #/.test($('ua-name').textContent)) return;
+    try { const u = await getJSON(`/users/${pageId}.json`); put(u && u.name); } catch { /* keep the id */ }
+  }
+  $('ua-saved').addEventListener('click', (e) => {
+    if (e.target.closest && e.target.closest('#ua-own')) { e.preventDefault(); showOwn(); return; }
+    const del = e.target.closest && e.target.closest('button[data-del]');
+    if (del) {   // two clicks: the first arms the button, the second deletes that one saved audit
+      e.preventDefault();
+      if (del.dataset.armed) { clearCache(del.dataset.del); showSavedList(); return; }
+      del.dataset.armed = '1'; del.classList.add('ua-armed'); del.textContent = 'Delete?';
+      setTimeout(() => { if (del.isConnected) { delete del.dataset.armed; del.classList.remove('ua-armed'); del.textContent = '🗑'; } }, 3000);
+      return;
+    }
+    const a = e.target.closest && e.target.closest('a[data-saved]');
+    if (!a) return;
+    e.preventDefault();
+    const c = loadCache(a.dataset.saved);
+    if (!c) { showSavedList(); return; }
+    profileId = a.dataset.saved; syncMode();
+    state = c.state;
+    if (!state.opts && c.opts) state.opts = Object.assign({}, c.opts, { ts: c.ts });
+    comments = c.comments || [];
+    userInfo = c.userInfo instanceof Map ? c.userInfo : new Map();
+    lookupFailed.clear();
+    if (c.lookupFailed instanceof Set) c.lookupFailed.forEach((x) => lookupFailed.add(x));
+    $('ua-saved').style.display = 'none';
+    $('ua-name').textContent = '— ' + state.user.name;
+    try { renderComments(); render(); showStamp(c.ts, true); }
+    catch (err) { log('Could not show the saved audit (' + err.message + ').'); }
   });
 
   $('ua-run').onclick = () => runAudit(false);
@@ -1974,6 +2157,7 @@
   $('ua-stop').onclick = () => { stopFlag = true; log('Stopping...'); };
 
   (function restoreSaved() {
+    if (!onProfile) return;
     const c = loadCache();
     if (!c) return;
     state = c.state;
@@ -1986,6 +2170,9 @@
       renderComments();
       render();
       showStamp(c.ts, true);
+      if (state.user && state.user.name) { $('ua-name').textContent = '— ' + state.user.name; pageName = state.user.name; renderTabs(); }
     } catch (e) { log('Could not show the saved audit (' + e.message + '). Press Run audit for fresh data.'); }
   })();
+  renderTabs();
+  if (onProfile && !pageName) { const nm0 = readNames()[pageId]; if (nm0) { pageName = nm0; renderTabs(); } }
 })();
