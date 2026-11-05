@@ -2,7 +2,7 @@
 // @name         blep User Audit
 // @namespace    blep-admin-tools
 // @version      1.36
-// @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
+// @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
 // @match        https://blep.art/*
