@@ -1,14 +1,14 @@
 // ==UserScript==
-// @name         e6ai BUR Transitive Resolver
+// @name         blep BUR Transitive Resolver
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-20
+// @version      2026-11-05
 // @description  One click resolve all transitives
 // @author       Tarrgon
 // @contributor  DRLa
 // @contributor  Jelloponies
-// @match        https://e6ai.net/bulk_update_requests/*
+// @match        https://blep.art/bulk_update_requests/*
 // @match        https://e621.net/bulk_update_requests/*
-// @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
+// @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
 // @grant        none
 // ==/UserScript==
 
