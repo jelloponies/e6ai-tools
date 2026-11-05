@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         e6AI Source Cleaner
-// @namespace    e6ai-admin-tools
+// @name         blep Source Cleaner
+// @namespace    blep-admin-tools
 // @version      1.4
-// @icon         https://e6ai.net/packs/static/default-66793a8a1f9191d01666.svg
+// @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
 // @author       Jelloponies
 // @description  Admin tool: remove invalid sources from one user's posts, with preview, backup and restore.
-// @match        https://e6ai.net/*
+// @match        https://blep.art/*
 // @match        https://e621.net/*
 // @noframes
 // @run-at       document-idle
