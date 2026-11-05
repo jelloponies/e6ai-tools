@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         blep Source Cleaner
 // @namespace    blep-admin-tools
-// @version      1.4
+// @version      1.41
 // @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
 // @author       Jelloponies
 // @description  Admin tool: remove invalid sources from one user's posts, with preview, backup and restore.
