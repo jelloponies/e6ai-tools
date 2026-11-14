@@ -5,7 +5,7 @@
 // @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
-// @match        https://blep.art/*
+// @match        https://floofgens.net/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
