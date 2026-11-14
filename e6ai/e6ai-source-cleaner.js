@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         blep Source Cleaner
-// @namespace    blep-admin-tools
-// @version      1.5
-// @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
+// @name         floof Source Cleaner
+// @namespace    floof-admin-tools
+// @version      1.7
+// @icon         https://floofgens.net/vite/assets/default-j7_m83bv.svg
 // @author       Jelloponies
 // @description  Admin tool: remove invalid sources from one user's posts, with preview, backup and restore.
-// @match        https://blep.art/*
+// @match        https://floofgens.net/*
 // @match        https://e621.net/*
 // @noframes
 // @run-at       document-idle
