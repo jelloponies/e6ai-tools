@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         blep BUR Transitive Resolver
 // @namespace    http://tampermonkey.net/
-// @version      2026-11-05
+// @version      2026-11-14
 // @description  One click resolve all transitives
 // @author       Tarrgon
 // @contributor  DRLa
 // @contributor  Jelloponies
-// @match        https://blep.art/bulk_update_requests/*
+// @match        https://floofgens.net/bulk_update_requests/*
 // @match        https://e621.net/bulk_update_requests/*
-// @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
 // @grant        none
 // ==/UserScript==
 
