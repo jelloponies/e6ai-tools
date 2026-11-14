@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         blep User Audit
-// @namespace    blep-admin-tools
-// @version      1.36
-// @icon         https://blep.art/vite/assets/default-CSiE0xgT.svg
+// @name         floof User Audit
+// @namespace    floof-admin-tools
+// @version      1.37
+// @icon         https://floofgens.net/vite/assets/default-j7_m83bv.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
 // @match        https://floofgens.net/*
