@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         floof User Audit
 // @namespace    floof-admin-tools
-// @version      1.37
+// @version      1.38
 // @icon         https://floofgens.net/vite/assets/default-j7_m83bv.svg
 // @author       Jelloponies
 // @description  Admin tool: on a user's profile page, audit their uploads, comments and votes (cast and received) and compare votes to their blacklist. Movable, resizable window.
@@ -29,7 +29,6 @@
   let userInfo = new Map();  // voter id -> user JSON (names, account age)
   let blSort = { key: 'total', dir: -1 };   // sort order of the blacklist entries table
   let copyReg = [];                          // lists behind the "copy IDs" links of the current render
-  const picked = new Set();                  // report sections ticked for "Export selected" (the ticks survive re-renders)
   let srcSort = { key: null, dir: 1 };      // sort order of the "Sources worth checking" table (null = default order)
   const SOURCE_ROWS_MAX = 100;               // most rows shown in that table
   const views = {};                          // per section: which list is shown, 'down' (default) or 'up'
@@ -489,10 +488,7 @@
     #ua-panel .ua-pos { color: var(--ua-pos); font-weight: bold; }
     #ua-panel .ua-zero { color: var(--ua-zero); font-weight: bold; }
     #ua-panel .ua-neg { color: var(--ua-neg); font-weight: bold; }
-    #ua-panel .ua-tools { margin-top: 10px; }
-    #ua-panel .ua-tools button { margin-top: 0; }
     #ua-panel a.ua-cp { font-size: 11px; color: var(--ua-muted); margin-left: 4px; white-space: nowrap; border-bottom: 0; }
-    #ua-panel input[data-pick] { margin: 0 5px 0 0; vertical-align: middle; cursor: pointer; }
     #ua-panel ul.ua-ul { list-style: disc outside; margin: 2px 0 6px; padding: 0 0 0 20px; }
     #ua-panel ul.ua-ul li { display: list-item; list-style: disc outside; margin: 2px 0; }
   `);
@@ -507,12 +503,6 @@
       <label>To <input type="date" id="ua-to"></label>
       <button id="ua-7">7d</button><button id="ua-30">30d</button><button id="ua-90">90d</button><button id="ua-all">All</button>
       <div class="hint">Timespan applies to comments and votes. Uploads are always the whole account. Max votes applies to each vote list separately.</div>
-    </div>
-    <div class="row ua-ctl">
-      <label><input type="checkbox" id="ua-do-posts" checked> Uploads</label>
-      <label><input type="checkbox" id="ua-do-comments" checked> Comments</label>
-      <label><input type="checkbox" id="ua-do-votes" checked> Votes cast</label>
-      <label><input type="checkbox" id="ua-do-received" checked> Votes received</label>
     </div>
     <div class="row ua-ctl">
       <label>Max comments <input type="number" id="ua-max-comments" value="1000" min="10" style="width:70px"></label>
@@ -530,7 +520,7 @@
     <div id="ua-log"></div>
     <div id="ua-report"></div>
     <details id="ua-sample" data-sec="Comment sample" style="display:none">
-      <summary><input type="checkbox" data-pick="Comment sample" title="Include in Export selected"> Comment sample</summary>
+      <summary>Comment sample</summary>
       <div class="row">
         <label>Sort
           <select id="ua-c-sort">
@@ -545,7 +535,7 @@
         <label>Contains <input type="text" id="ua-c-text" style="width:130px"></label>
         <label>Show <input type="number" id="ua-c-n" value="20" min="1" style="width:55px"></label>
       </div>
-      <div id="ua-comments"><span class="hint">Run an audit with Comments ticked to load them.</span></div>
+      <div id="ua-comments"><span class="hint">Run an audit to load them.</span></div>
     </details>
   `;
   panel.classList.toggle('ua-off', !onProfile);
@@ -676,18 +666,15 @@
 
   // ---------- remembered settings ----------
   const FIELDS = ['ua-from', 'ua-to', 'ua-max-comments', 'ua-max-votes'];
-  const BOXES = ['ua-do-posts', 'ua-do-comments', 'ua-do-votes', 'ua-do-received'];
   function saveSettings() {
     const s = {};
     FIELDS.forEach((id) => (s[id] = $(id).value));
-    BOXES.forEach((id) => (s[id] = $(id).checked));
     GM_setValue('settings', JSON.stringify(s));
   }
   (function loadSettings() {
     let s = {};
     try { s = JSON.parse(GM_getValue('settings', '{}')); } catch { /* ignore */ }
     FIELDS.forEach((id) => { if (typeof s[id] === 'string') $(id).value = s[id]; });
-    BOXES.forEach((id) => { if (typeof s[id] === 'boolean') $(id).checked = s[id]; });
   })();
   // Expanding a count inside a table opens its list in a new full-width row under it, so the columns stay put.
   panel.addEventListener('toggle', (e) => {
@@ -878,7 +865,7 @@
   const table = (head, rows) => rows.length
     ? `<table><tr>${head.map((h) => `<th>${esc(h)}</th>`).join('')}</tr>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</table>`
     : '<div class="hint">Nothing to show.</div>';
-  const section = (title, body) => `<details data-sec="${esc(title)}"${secOpen[title] ? ' open' : ''}><summary><input type="checkbox" data-pick="${esc(title)}" title="Include in Export selected"${picked.has(title) ? ' checked' : ''}> ${esc(title)}</summary>${body}</details>`;
+  const section = (title, body) => `<details data-sec="${esc(title)}"${secOpen[title] ? ' open' : ''}><summary>${esc(title)}</summary>${body}</details>`;
   const viewOf = (key) => (views[key] === 'up' ? 'up' : 'down');
   const viewToggle = (key, downLabel, upLabel) => { const v = viewOf(key); return `<div><button data-view-key="${esc(key)}" data-view="down" class="${v === 'down' ? 'ua-on' : ''}">${esc(downLabel)}</button><button data-view-key="${esc(key)}" data-view="up" class="${v === 'up' ? 'ua-on' : ''}">${esc(upLabel)}</button></div>`; };
   const group = (title, html) => (html ? `<div class="ua-grp">${esc(title)}</div>${html}` : '');
@@ -1191,7 +1178,7 @@
     const opens = [...root.querySelectorAll('details')].map((d) => d.open);   // keep what the user expanded
     const flags = buildFlags();
     root.innerHTML =
-      toolsBar() + (flags.length ? `<div class="ua-flags"><label><input type="checkbox" data-pick="Worth a look" title="Include in Export selected"${picked.has('Worth a look') ? ' checked' : ''}> <b>Worth a look</b></label> <span class="hint">(prompts for review, not verdicts; click one to jump to it)</span><ul>${flags.map((x) => `<li><a href="#" data-goto="${esc(x.sec)}"${x.view ? ` data-view="${x.view}"` : ''}${x.sub ? ` data-sub="${x.sub}"` : ''}>${esc(x.t)}</a></li>`).join('')}</ul></div>` : '') +
+      (flags.length ? `<div class="ua-flags"><b>Worth a look</b> <span class="hint">(prompts for review, not verdicts; click one to jump to it)</span><ul>${flags.map((x) => `<li><a href="#" data-goto="${esc(x.sec)}"${x.view ? ` data-view="${x.view}"` : ''}${x.sub ? ` data-sub="${x.sub}"` : ''}>${esc(x.t)}</a></li>`).join('')}</ul></div>` : '') +
       '<div class="ua-allbar"><button data-all="open">Expand all</button><button data-all="close">Collapse all</button></div>' +
       group('Account', secOverview() + (state.posts ? secPosts() : '') + (state.comments ? secComments() : '') + '<div id="ua-sample-slot"></div>') +
       group('Votes they cast', (state.votes ? secVotes() + secBlacklist() + secTags() : '') + secCommentVotes()) +
@@ -1200,7 +1187,6 @@
     if (ds.length === opens.length) ds.forEach((d, i) => { d.open = opens[i]; });
     const slot = $('ua-sample-slot');
     if (slot) slot.replaceWith(sample);   // the sample sits right under Comments
-    updatePickCount();
   }
 
   // ---------- comment sample ----------
@@ -1232,7 +1218,7 @@
 
   // ---------- audit ----------
   async function runAudit(quick = false) {
-    const want = (id) => (quick ? id === 'ua-do-posts' || id === 'ua-do-comments' : $(id).checked);   // quick audit: uploads and comments only
+    const want = (id) => !quick || id === 'ua-do-posts' || id === 'ua-do-comments';   // full audit runs everything; quick audit: uploads and comments only
     Object.keys(secOpen).forEach((k) => delete secOpen[k]);   // every new audit starts with all sections collapsed
     panel.appendChild($('ua-sample'));   // the comment sample sits inside the report, so move it out before the report is cleared
     $('ua-report').innerHTML = '';
@@ -1521,7 +1507,7 @@
   }
 
 
-  // ---------- export and copy ----------
+  // ---------- copy ----------
   const DT_MAX = 50;   // most IDs written out one by one in a DText list
   function idOf(x) { return x && typeof x === 'object' ? x.id : x; }
   function fmtDT(ts) { const d = new Date(ts), z = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`; }
@@ -1531,43 +1517,6 @@
     if (ids.length > DT_MAX) out += ` (+${ids.length - DT_MAX} more)`;
     if (kind === 'post' && ids.length > 1) out += ` — "view${ids.length > 100 ? ' first 100' : ' all'}":/posts?tags=id:${ids.slice(0, 100).join(',')}`;
     return out;
-  }
-  const cleanFlag = (t) => t.replace(/ Details under Uploads → Sources worth checking\./, '');
-  function summaryLines() {
-    const u = state.user, L = [];
-    const P = state.posts && state.posts.stats, C = state.comments && state.comments.stats, V = state.votes && state.votes.A;
-    const CV = state.cvotes && !state.cvotes.error ? state.cvotes : null;
-    L.push(`Joined ${day(Date.parse(u.created_at))}${u.level_string ? ', ' + u.level_string : ''}`);
-    if (P) {
-      let x = `${P.total} uploads (${P.deleted} deleted, ${pct(P.deleted, P.total)}%; ${P.noSource} without a source)`;
-      if (state.replaced && state.replaced.posts) x += `; ${state.replaced.posts.length} replaced`;
-      L.push(x);
-      const SS = P.sources, bits = [];
-      if (SS) {
-        if (SS.invalidPosts) bits.push(`${SS.invalidPosts} with a source that isn't a valid link`);
-        if (SS.landingPosts) bits.push(`${SS.landingPosts} with a profile or landing page as source`);
-        if (SS.chatPosts) bits.push(`${SS.chatPosts} with an invite link as source`);
-      }
-      if (bits.length) L.push('Sources: ' + bits.join(', '));
-    }
-    if (C && C.total) L.push(`${C.total} comments loaded: ${pct(C.negative, C.total)}% with a negative score, ${C.hidden} hidden`);
-    if (V && V.up + V.down) {
-      let x = `Post votes: ${V.up + V.down} analysed, ${pct(V.down, V.up + V.down)}% downvotes`;
-      if (state.blacklist && !state.blacklist.error && state.blacklist.entries.length && V.down) x += `; ${V.blDown.length} of ${V.down} downvotes were on posts their blacklist hides`;
-      L.push(x);
-    }
-    if (CV && CV.up + CV.down) L.push(`Comment votes: ${CV.up + CV.down} analysed, ${pct(CV.down, CV.up + CV.down)}% downvotes`);
-    return L;
-  }
-  function buildSummary() {
-    const u = state.user, o = state.opts || {}, L = [];
-    const span = o.quick ? 'quick audit (uploads and comments only)' : `comments and votes from ${o.from ? day(o.from) : 'the start'} to ${o.to ? day(o.to) : 'now'}`;
-    L.push(`[b]User audit: "${u.name}":/users/${u.id}[/b]`, `Audited ${fmtDT(o.ts || Date.now())}; ${span}.`, '', '[b]Account[/b]');
-    summaryLines().forEach((x) => L.push('* ' + x));
-    L.push('');
-    const flags = buildFlags();
-    if (flags.length) { L.push('[b]Worth a look[/b]'); flags.forEach((f) => L.push('* ' + cleanFlag(f.t))); L.push(''); }
-    return L.join('\n').trim();
   }
   function fallbackCopy(text) {
     const ta = document.createElement('textarea');
@@ -1584,307 +1533,11 @@
     if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text).then(() => true, () => fallbackCopy(text));
     return Promise.resolve(fallbackCopy(text));
   }
-  async function flash(el, pr, busy) {   // brief feedback on the button or link that was clicked
+  async function flash(el, pr) {   // brief feedback on the button or link that was clicked
     const orig = el.innerHTML;
-    if (busy) el.textContent = busy;
-    const r = await pr;
-    el.textContent = r === 'none' ? 'Nothing selected' : (typeof r === 'string' && r) ? r : r ? 'Copied ✓' : 'Copy failed';
-    setTimeout(() => { if (el.isConnected) el.innerHTML = orig; }, busy ? 2200 : 1400);
+    el.textContent = (await pr) ? 'Copied ✓' : 'Copy failed';
+    setTimeout(() => { if (el.isConnected) el.innerHTML = orig; }, 1400);
   }
-  function download(name, text, type) {
-    const url = URL.createObjectURL(new Blob([text], { type }));
-    const a = document.createElement('a');
-    a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
-  }
-  const fileName = (prefix, ext) => `${prefix}_${String(state.user.name).replace(/[^\w.-]+/g, '_')}_${day(Date.now())}.${ext}`;
-  function toolsBar() {
-    return '<div class="ua-tools">' +
-      '<button data-act="report" title="The whole report, as it is shown now, as an HTML file you can send to someone">Export full report</button>' +
-      '<button data-act="custom" title="Only the sections whose box you ticked, as an HTML file you can send to someone">Export selected (<span data-pickcount>0</span>)</button>' +
-      '<button data-act="png" title="The whole report as one picture, copied to the clipboard so you can paste it straight into Discord">Copy PNG</button>' +
-      '<button data-act="pngsel" title="Only the sections whose box you ticked, as one picture copied to the clipboard">Copy PNG selected (<span data-pickcount>0</span>)</button>' +
-      '<div class="hint">Tick the box next to a section title to include it in “Export selected” and "Copy PNG selected".</div></div>';
-  }
-  function updatePickCount() { $('ua-report').querySelectorAll('[data-pickcount]').forEach((x) => { x.textContent = $('ua-report').querySelectorAll('input[data-pick]:checked').length; }); }
-
-  // ---------- shareable HTML files ----------
-  const EXPORT_CSS = `
-    :root { --bg: #000; --fg: #222; --section: #333; --light: #4d4d4d; --text: #fff; --muted: #cbb295; --link: #ffee95; --hover: #f68b00; --accent: #e8c446; --pos: #4ccf5f; --zero: #ffc800; --neg: #ff5a5a; color-scheme: dark; }
-    body { background: var(--section); color: var(--text); font: 13px/1.45 system-ui, sans-serif; margin: 0 auto; padding: 16px; max-width: 960px; }
-    h1 { font-size: 18px; margin: 0 0 2px; }
-    a { color: var(--link); text-decoration: none; } a:hover { color: var(--hover); text-decoration: underline; }
-    code { color: var(--text); } .hint { font-size: 11px; color: var(--muted); }
-    table { border-collapse: collapse; width: 100%; margin: 4px 0 8px; }
-    th, td { border-bottom: 1px solid var(--fg); padding: 2px 6px; text-align: left; font-size: 12px; vertical-align: top; }
-    th { color: #e6e6e6; background: var(--fg); }
-    details { margin-top: 8px; } summary { cursor: pointer; font-weight: bold; }
-    h2 { font-size: 13px; margin: 16px 0 2px; color: var(--accent); }
-    .ua-grp { margin: 18px 0 2px; padding-bottom: 3px; font-size: 11px; font-weight: bold; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); border-bottom: 1px solid var(--light); }
-    .ua-flags { background: var(--fg); border: 1px solid var(--accent); border-radius: 6px; padding: 6px 10px; margin-top: 10px; }
-    ul.ua-ul, .ua-flags ul { list-style: disc outside; margin: 4px 0 6px; padding: 0 0 0 20px; } .ua-flags li, ul.ua-ul li { display: list-item; margin: 3px 0; }
-    details.ua-src { margin: 12px 0; border: 1px solid var(--accent); border-radius: 5px; background: var(--fg); }
-    details.ua-src > summary { padding: 5px 8px; color: var(--accent); } details.ua-src > :not(summary) { margin-left: 8px; margin-right: 8px; }
-    details.ua-src > table { width: calc(100% - 16px); margin-bottom: 8px; }
-    details.ua-x { display: inline-block; margin: 0; } details.ua-x > summary { font-weight: normal; }
-    .ua-links { max-width: 330px; max-height: 140px; overflow: auto; line-height: 1.5; }
-    .ua-pos { color: var(--pos); font-weight: bold; } .ua-zero { color: var(--zero); font-weight: bold; } .ua-neg { color: var(--neg); font-weight: bold; }
-    .ua-c { border-bottom: 1px solid var(--fg); padding: 5px 0; } .ua-c .meta { font-size: 11px; color: var(--muted); }
-    .ua-vb { display: inline-block; cursor: pointer; margin: 4px 6px 4px 0; padding: 4px 10px; background: var(--fg); color: var(--link); border: 1px solid var(--light); border-radius: 4px; user-select: none; }
-    .ua-vb:hover { color: var(--hover); } .ua-vb.on { border-color: var(--accent); color: var(--accent); }
-    .ua-vlabel { margin: 10px 0 2px; font-weight: bold; color: var(--accent); }
-    .ua-allbar { margin: 10px 0 0; text-align: right; }
-    a.ua-cp { font-size: 11px; color: var(--muted); margin-left: 4px; white-space: nowrap; }
-    th[data-bl-sort], th[data-src-sort] { cursor: pointer; }
-  `;
-  function exportDoc(title, body, note) {
-    const u = state.user, o = state.opts || {};
-    const span = o.quick ? 'quick audit (uploads and comments only)' : `comments and votes from ${o.from ? day(o.from) : 'the start'} to ${o.to ? day(o.to) : 'now'}`;
-    return `<!doctype html>\n<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)}: ${esc(u.name)}</title><style>${EXPORT_CSS}</style></head><body>` +
-      `<h1>${esc(title)}: <a href="${location.origin}/users/${u.id}" target="_blank">${esc(u.name)}</a></h1>` +
-      `<div class="hint">Audited ${esc(fmtDT(o.ts || Date.now()))}; ${esc(span)}. Exported ${esc(fmtDT(Date.now()))} by e6AI User Audit 1.42. Warnings are prompts for review, not verdicts.${note ? ' ' + esc(note) : ''}</div>` +
-      body + '</body></html>';
-  }
-  // The report exactly as it is shown now (including which of the up/down lists is showing), cleaned of buttons and made readable on its own.
-  // `only`: a Set of section titles to keep (everything when omitted)
-  // The five sections with a Down/Up switch: in the panel only one list shows, the export carries both.
-  const VIEW_KEYS = ['Votes on posts', 'Votes on comments', 'Votes on their posts', 'Votes on their comments', 'Tags they vote on'];
-  function bothViews() {
-    const saved = {};
-    VIEW_KEYS.forEach((k) => { saved[k] = views[k]; });
-    const out = {};
-    try {
-      for (const v of ['down', 'up']) {
-        VIEW_KEYS.forEach((k) => { views[k] = v; });
-        render();
-        $('ua-report').querySelectorAll('a.ua-cp').forEach((a) => {   // the list behind each "copy IDs" link, so the exported file can copy it too
-          const g = copyReg[Number(a.dataset.copy)];
-          if (g) { a.dataset.kind = g.kind; a.dataset.ids = g.items.map(idOf).join(','); }
-        });
-        out[v] = $('ua-report').cloneNode(true);
-      }
-    } finally {
-      VIEW_KEYS.forEach((k) => { if (saved[k] === undefined) delete views[k]; else views[k] = saved[k]; });
-      render();
-    }
-    out.cur = (k) => (saved[k] === 'up' ? 'up' : 'down');
-    return out;
-  }
-  // mode 'html': a Down/Up switch you can click; 'static': both lists one after the other (for the picture)
-  function mergeViews(down, up, cur, mode) {
-    down.querySelectorAll('details[data-sec]').forEach((d) => {
-      const tgBtn = d.querySelector('button[data-view-key]');
-      if (!tgBtn) return;
-      const tg = tgBtn.parentElement, key = tgBtn.dataset.viewKey;
-      const u = [...up.querySelectorAll('details[data-sec]')].find((x) => x.dataset.sec === d.dataset.sec);
-      const ut = u && u.querySelector('button[data-view-key]');
-      if (!ut) return;
-      const labels = { down: tg.querySelector('button[data-view="down"]').textContent, up: tg.querySelector('button[data-view="up"]').textContent };
-      const after = (el) => { const a = []; for (let n = el.nextSibling; n; n = n.nextSibling) a.push(n); return a; };
-      const parts = { down: after(tg), up: after(ut.parentElement) };
-      const wrap = document.createElement('div');
-      wrap.className = 'ua-vw';
-      if (mode === 'html') {
-        const row = document.createElement('div');
-        ['down', 'up'].forEach((v) => {
-          const b = document.createElement('span');
-          b.className = 'ua-vb' + (v === cur(key) ? ' on' : '');
-          b.setAttribute('role', 'button'); b.setAttribute('tabindex', '0'); b.dataset.v = v; b.textContent = labels[v];
-          row.appendChild(b);
-        });
-        wrap.appendChild(row);
-      }
-      ['down', 'up'].forEach((v) => {
-        const box = document.createElement('div');
-        box.className = 'ua-view'; box.dataset.v = v;
-        if (mode === 'html' && v !== cur(key)) box.style.display = 'none';
-        if (mode !== 'html') { const l = document.createElement('div'); l.className = 'ua-vlabel'; l.textContent = labels[v]; box.appendChild(l); }
-        parts[v].forEach((n) => box.appendChild(n));
-        wrap.appendChild(box);
-      });
-      tg.replaceWith(wrap);   // everything that came after the old switch now sits inside the two boxes
-    });
-  }
-  // Runs inside the exported HTML file (written out with toString, so it must not use anything from this script).
-  const EXPORT_SCRIPT = '<script>(' + (function () {
-    var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
-    function setView(w, v) {
-      $$('.ua-vb[data-v]', w).forEach(function (x) { x.classList.toggle('on', x.dataset.v === v); });
-      $$('.ua-view', w).forEach(function (x) { x.style.display = x.dataset.v === v ? '' : 'none'; });
-    }
-    function copy(text, el) {
-      var orig = el.innerHTML;
-      var done = function (ok) { el.textContent = ok ? 'Copied ✓' : 'Copy failed'; setTimeout(function () { el.innerHTML = orig; }, 1400); };
-      var fallback = function () {
-        var ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px;top:0';
-        document.body.appendChild(ta); ta.select();
-        var ok = false; try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
-        ta.remove(); done(ok);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { done(true); }, fallback); else fallback();
-    }
-    function dtIds(kind, ids) {
-      var out = ids.slice(0, 50).map(function (i) { return kind + ' #' + i; }).join(', ');
-      if (ids.length > 50) out += ' (+' + (ids.length - 50) + ' more)';
-      if (kind === 'post' && ids.length > 1) out += ' \u2014 "view' + (ids.length > 100 ? ' first 100' : ' all') + '":/posts?tags=id:' + ids.slice(0, 100).join(',');
-      return out;
-    }
-    function sortTable(th) {
-      var key = th.dataset.blSort || th.dataset.srcSort, table = th.closest('table'), head = th.parentNode;
-      var cells = Array.prototype.slice.call(head.children), idx = cells.indexOf(th);
-      var cur = cells.filter(function (c) { return /[\u25B2\u25BC]$/.test(c.textContent); })[0];
-      var textKey = key === 'entry' || key === 'source' || key === 'kind';
-      var dir = cur === th ? (/\u25B2$/.test(th.textContent) ? -1 : 1) : (textKey ? 1 : -1);
-      cells.forEach(function (c) { c.textContent = c.textContent.replace(/ [\u25B2\u25BC]$/, ''); });
-      th.textContent += dir > 0 ? ' \u25B2' : ' \u25BC';
-      var rows = $$('tr', table).filter(function (r) { return !r.querySelector('th'); });
-      rows.forEach(function (r, n) { if (r._i === undefined) r._i = n; });
-      var val = function (r) {
-        var t = (r.children[idx] ? r.children[idx].textContent : '').trim();
-        return textKey ? t.toLowerCase() : (parseFloat(t.replace(/[^0-9.+-]/g, '')) || 0);
-      };
-      rows.sort(function (a, b) { var x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * dir || a._i - b._i; });
-      rows.forEach(function (r) { r.parentNode.appendChild(r); });
-    }
-    document.addEventListener('click', function (e) {
-      var t = e.target;
-      if (!t.closest) return;
-      var vb = t.closest('.ua-vb');
-      if (vb && vb.dataset.v) { setView(vb.closest('.ua-vw'), vb.dataset.v); return; }
-      if (vb && vb.dataset.all) { $$('details:not(.ua-x)').forEach(function (d) { d.open = vb.dataset.all === 'open'; }); return; }
-      var cp = t.closest('a.ua-cp');
-      if (cp) {
-        e.preventDefault();
-        var ids = (cp.dataset.ids || '').split(',').filter(Boolean);
-        copy(e.shiftKey ? ids.join(',') : dtIds(cp.dataset.kind, ids), cp);
-        return;
-      }
-      var g = t.closest('a[data-goto]');
-      if (g) {
-        e.preventDefault();
-        var d = $$('details[data-sec]').filter(function (x) { return x.dataset.sec === g.dataset.goto; })[0];
-        if (!d) return;
-        d.open = true;
-        if (g.dataset.view) { var w = d.querySelector('.ua-vw'); if (w) setView(w, g.dataset.view); }
-        var target = d;
-        if (g.dataset.sub === 'src') { var x = d.querySelector('details.ua-src'); if (x) { x.open = true; target = x; } }
-        target.scrollIntoView({ block: 'start', behavior: 'smooth' });
-        return;
-      }
-      var th = t.closest('th[data-bl-sort], th[data-src-sort]');
-      if (th) sortTable(th);
-    });
-    document.addEventListener('keydown', function (e) {
-      if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('ua-vb')) { e.preventDefault(); e.target.click(); }
-    });
-  }).toString() + ')();<\/script>';
-  function reportFile(only, mode = 'html') {
-    const both = bothViews();
-    const root = both.down;
-    mergeViews(root, both.up, both.cur, mode);
-    root.removeAttribute('id');
-    root.style.minHeight = '';
-    root.querySelectorAll(mode === 'html' ? '.ua-tools, tr.ua-xrow' : '.ua-tools, .ua-allbar, tr.ua-xrow, a.ua-cp').forEach((n) => n.remove());
-    let note = '';
-    if (only) {
-      const names = [];
-      if (!only.has('Worth a look')) { const f = root.querySelector('.ua-flags'); if (f) f.remove(); } else if (root.querySelector('.ua-flags')) names.push('Worth a look');
-      [...root.children].forEach((el) => {
-        if (el.matches('details[data-sec]')) { if (only.has(el.dataset.sec)) names.push(el.dataset.sec); else el.remove(); }
-      });
-      root.querySelectorAll('.ua-grp').forEach((g) => {   // drop a group heading when none of its sections are left
-        let n = g.nextElementSibling, any = false;
-        while (n && !n.classList.contains('ua-grp')) { if (n.matches('details[data-sec]')) any = true; n = n.nextElementSibling; }
-        if (!any) g.remove();
-      });
-      note = 'Selected sections: ' + names.join(', ') + '.';
-    }
-    root.querySelectorAll('input[data-pick]').forEach((n) => n.remove());
-    const sm = root.querySelector('#ua-sample');
-    if (sm) { if (sm.style.display === 'none' || !sm.querySelector('.ua-c')) sm.remove(); else { sm.removeAttribute('id'); sm.querySelectorAll('.row').forEach((n) => n.remove()); } }
-    root.querySelectorAll('button[data-view-key]').forEach((b) => {
-      if (b.classList.contains('ua-on')) { const x = document.createElement('b'); x.textContent = 'Showing: ' + b.textContent; b.replaceWith(x); } else b.remove();
-    });
-    root.querySelectorAll('.ua-allbar button[data-all]').forEach((b) => {   // the Expand all / Collapse all buttons stay usable in the file
-      const x = document.createElement('span');
-      x.className = 'ua-vb'; x.setAttribute('role', 'button'); x.setAttribute('tabindex', '0'); x.dataset.all = b.dataset.all; x.textContent = b.textContent;
-      b.replaceWith(x);
-    });
-    root.querySelectorAll('button').forEach((b) => b.remove());
-    root.querySelectorAll('a[data-goto]').forEach((a) => {   // the "worth a look" links keep working when the section they point at is in the file
-      const sec = a.dataset.goto.replace(/"/g, '\\"');
-      if (mode === 'html' && root.querySelector(`details[data-sec="${sec}"]`)) a.setAttribute('href', '#'); else a.replaceWith(...a.childNodes);
-    });
-    root.querySelectorAll('a[href^="/"]').forEach((a) => a.setAttribute('href', location.origin + a.getAttribute('href')));
-    root.querySelectorAll('[title]').forEach((n) => { if (!(mode === 'html' && n.matches('a.ua-cp, th[data-bl-sort], th[data-src-sort], a[data-goto]'))) n.removeAttribute('title'); });
-    root.querySelectorAll('details[data-sec], details.ua-src, details:not(.ua-x)').forEach((d) => { if (mode === 'html') d.removeAttribute('open'); else d.setAttribute('open', ''); });   // the HTML file starts collapsed; the picture needs everything open
-    root.querySelectorAll('details.ua-x').forEach((d) => d.removeAttribute('open'));
-    const html0 = root.innerHTML;
-    const html = (mode === 'html' ? html0 : html0.replace(/ Click a column header to sort\./g, '').replace('; click one to jump to it)', ')')) + (mode === 'html' ? EXPORT_SCRIPT : '');
-    return exportDoc('User audit', html, note);
-  }
-  // The report (or the ticked sections) as a PNG: the export page is laid out in a hidden frame, then drawn through an SVG picture onto a canvas.
-  async function reportPngBlob(only) {
-    const W = 1000, MAX_H = 16000;
-    const frame = document.createElement('iframe');
-    frame.style.cssText = `position:fixed;left:-20000px;top:0;width:${W}px;height:200px;border:0;visibility:hidden`;
-    frame.srcdoc = reportFile(only, 'static');
-    const loaded = new Promise((res) => { frame.onload = res; });
-    document.body.appendChild(frame);
-    try {
-      await loaded;
-      const doc = frame.contentDocument;
-      const H = Math.ceil(Math.max(doc.documentElement.scrollHeight, doc.body.scrollHeight));
-      const scale = Math.min(2, MAX_H / H);
-      if (scale < 0.7) throw new Error('the report is too tall for one picture, tick fewer sections and use the selected button');
-      const xs = new XMLSerializer();
-      const xhtml = `<div xmlns="http://www.w3.org/1999/xhtml">${xs.serializeToString(doc.querySelector('style'))}${xs.serializeToString(doc.body)}</div>`;
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><foreignObject x="0" y="0" width="${W}" height="${H}">${xhtml}</foreignObject></svg>`;
-      const img = new Image();
-      const ready = new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('the browser could not draw the report as a picture')); });
-      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
-      await ready;
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.round(W * scale); canvas.height = Math.round(H * scale);
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#333'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      return await new Promise((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error('the picture could not be made'))), 'image/png'));
-    } finally { frame.remove(); }
-  }
-  async function copyPng(only, name) {
-    try {
-      const pending = reportPngBlob(only);
-      pending.catch(() => {});
-      if (navigator.clipboard && window.ClipboardItem) {
-        try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': pending })]); return 'Copied ✓'; } catch (e) { log('Could not copy the picture to the clipboard (' + e.message + '), saving it as a file instead.'); }
-      }
-      download(name, await pending, 'image/png');
-      return 'Saved as file';
-    } catch (e) { log('PNG failed: ' + e.message); return 'PNG failed (see log)'; }
-  }
-  function doAct(act, btn) {
-    if (act === 'summary') return flash(btn, copyText(buildSummary()));
-    if (act === 'report') download(fileName('audit', 'html'), reportFile(), 'text/html');
-    if (act === 'png') return flash(btn, copyPng(undefined, fileName('audit', 'png')), 'Rendering…');
-    if (act === 'pngsel') {
-      const only = new Set([...$('ua-report').querySelectorAll('input[data-pick]:checked')].map((c) => c.dataset.pick));
-      if (!only.size) return flash(btn, 'none');
-      return flash(btn, copyPng(only, fileName('audit_selected', 'png')), 'Rendering…');
-    }
-    if (act === 'custom') {
-      const only = new Set([...$('ua-report').querySelectorAll('input[data-pick]:checked')].map((c) => c.dataset.pick));
-      if (!only.size) return flash(btn, 'none');
-      download(fileName('audit_selected', 'html'), reportFile(only), 'text/html');
-    }
-  }
-  $('ua-report').addEventListener('change', (e) => {
-    const cb = e.target.closest && e.target.closest('input[data-pick]');
-    if (!cb) return;
-    if (cb.checked) picked.add(cb.dataset.pick); else picked.delete(cb.dataset.pick);
-    updatePickCount();
-  });
 
   const lookupFailed = new Set();   // voter ids whose profile could not be loaded
 
@@ -1922,8 +1575,6 @@
       if (g) flash(cpl, copyText(e.shiftKey ? g.items.map(idOf).join(',') : dtIds(g.kind, g.items)));
       return;
     }
-    const act = e.target.closest && e.target.closest('button[data-act]');
-    if (act) { doAct(act.dataset.act, act); return; }
     const gt = e.target.closest && e.target.closest('a[data-goto]');
     if (gt) {
       e.preventDefault();
